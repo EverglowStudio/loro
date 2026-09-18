@@ -109,3 +109,89 @@ regression on out-of-order batches, where every blob parks and is later unlocked
   `import_batch_failure_leaves_doc_attached_and_unchanged`.
 - `crates/loro-internal/src/oplog/pending_changes.rs`: the `import_batch_*` regressions
   that assert the doc is attached after a batch.
+
+## Borrowed updates-only batches (2026-09-18)
+
+`LoroDoc::import_updates_batch(&[&[u8]])` accepts only current `FastUpdates`.
+Header/mode preflight does not scan checksums or decode metadata. The ordinary
+import decoder validates each checksum and body; input order is preserved and
+missing dependencies go through the existing pending queue. This avoids the
+metadata decoder's temporary doc and full operation decode used for sorting by
+`import_batch`. Borrowing avoids requiring caller-owned Vec copies, but internal
+decoding still copies/allocates; this is not zero-copy.
+
+Both APIs use `import_batch_inner` and `BatchImportGuard`. The old API retains its
+metadata sorting (including mixed snapshots) and zero/single-item shortcuts. The
+new API uses the kernel for all sizes, including empty input. Its `pending` is the
+remainder of all imported operations absent from the oplog, including earlier
+calls. In `finish`, the oplog lock and txn guard protect a single consistent read
+of pending entries and VV. `PendingChanges::version_range_since` trims each entry's
+applied prefix and excludes fully covered entries before merging per-peer bounding
+ranges; it does not mutate the queue or change legacy API reporting. A bounding
+range is not an exact missing-dependency set or a pending-blob count.
+
+Neither API provides ACID/all-or-nothing decode-error behavior. Successful blobs
+before or after a decode error may remain applied or pending. The final-checkout
+rollback and native panic-cleanup behavior described above is unchanged; callers
+needing isolation after any error should discard their candidate document.
+
+Regression coverage (added here; execution is delegated to the integrating agent):
+
+- `crates/loro/tests/import_updates_batch.rs`: order, duplicates, overlap, prior
+  unrelated pending at sizes 0/1/multi, dependency unlock, rejected headers/modes,
+  and unchanged legacy empty/single/mixed-snapshot behavior.
+- `src/tests/import_atomicity.rs`: shared guard fixtures now exercise both APIs;
+  new decode-error cleanup and a thread-local metadata call counter with the old
+  batch as a positive control.
+- `src/oplog/pending_changes.rs`:
+  `import_updates_batch_excludes_covered_pending_entries_before_merging` injects
+  stale queue entries from real decoded spans to check partial/full coverage and
+  disjoint ranges deterministically without changing CRDT logic.
+- `crates/loro/examples/import_updates_batch_perf.rs`: native same-binary old/new
+  comparison; fixed peers/body; 1/32/128 increments, ordered/reversed; warmup 2,
+  samples 10 per API. Timing includes empty target construction, import, and full
+  VV/body/status/attachment checks; fixtures, borrowed views, teardown and JSON
+  output are excluded. It does not measure allocations.
+
+### Git-consumer dependency source
+
+A source comparison against locally cached crates.io `generic-btree 0.10.7` found
+three nonidentical files: `src/lib.rs`, `src/iter.rs`, and
+`src/generic_impl/rope.rs`. The in-tree changes are Clippy/control-flow/lifetime
+cleanups (`div_ceil`, pattern matching and explicit iterator lifetimes), not a
+new B-tree algorithm; runtime dependency requirements match. The vendoring commit
+`9b6330db` and cleanup commit `ac1feb61` explain these differences. Do not claim a
+B-tree performance improvement from this source correction.
+
+A dependency's workspace-root `[patch.crates-io]` is not inherited by a Git
+consumer. Consequently, the direct `generic-btree` dependencies in `loro`,
+`loro-internal`, and their actual `loro-delta` dependency now specify
+`path = "../generic-btree"` alongside the existing `version = "^0.10.7"`.
+Git consumers therefore select the same revision's in-tree crate that standalone
+workspace validation uses, without a patch in every consumer root. The root patch
+is retained for other workspace dependencies. No B-tree source or dependency
+version is changed. Consumer `cargo metadata` verification is delegated to the
+integrating agent; it has not been run here.
+
+### Integration commands for this patch
+
+From this Loro checkout, run these **serially** (not executed by the implementation
+agent; only targeted rustfmt and `git diff --check` were run):
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --locked -p loro --test import_updates_batch -j 2
+CARGO_INCREMENTAL=0 cargo test --locked -p loro-internal --lib import_atomicity -j 2
+CARGO_INCREMENTAL=0 cargo test --locked -p loro-internal --lib import_updates_batch_excludes_covered_pending_entries_before_merging -j 2
+CARGO_INCREMENTAL=0 cargo test --locked -p loro --test contracts sync_import -j 2
+CARGO_INCREMENTAL=0 cargo test --locked -p loro --doc import_updates_batch -j 2
+CARGO_INCREMENTAL=0 cargo build --locked -p loro --release --example import_updates_batch_perf -j 2
+./target/release/examples/import_updates_batch_perf
+```
+
+If the integrating agent sets `CARGO_TARGET_DIR`, use that directory's
+`release/examples/import_updates_batch_perf` binary instead. Record the actual
+revision/dirty tree, rustc version and binary hash alongside the JSONL output.
+The example emits 1 configuration line plus 144 measurement lines (24 warmups,
+120 samples), with per-invocation microseconds and milliseconds. It reports no
+allocation metric. Correctness/performance results remain unverified until these
+commands are run by the integrating agent.

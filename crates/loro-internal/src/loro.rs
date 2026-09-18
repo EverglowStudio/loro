@@ -1480,7 +1480,6 @@ impl LoroDoc {
             return self.import(&bytes[0]);
         }
 
-        let mut success = VersionRange::default();
         let mut meta_arr = bytes
             .iter()
             .map(|b| Ok((LoroDoc::decode_import_blob_meta(b, false)?, b)))
@@ -1491,6 +1490,34 @@ impl LoroDoc {
                 .then(b.0.change_num.cmp(&a.0.change_num))
         });
 
+        self.import_batch_inner(meta_arr.into_iter().map(|(_, data)| data.as_slice()), false)
+    }
+
+    /// Import borrowed current-format updates without decoding metadata for sorting.
+    ///
+    /// See the public `loro::LoroDoc::import_updates_batch` contract. In particular,
+    /// pending includes all still-blocked imported operations, including prior calls,
+    /// for every batch size. This is not an all-or-nothing transaction on decode errors.
+    #[tracing::instrument(skip_all)]
+    pub fn import_updates_batch(&self, updates: &[&[u8]]) -> LoroResult<ImportStatus> {
+        // Preflight only the fixed-size envelope. The ordinary import decoder below
+        // validates each checksum and body once; no temporary metadata doc is needed.
+        for data in updates {
+            if parse_header_and_body(data, false)?.mode != EncodeMode::FastUpdates {
+                return Err(LoroError::ImportUnsupportedEncodingMode);
+            }
+        }
+        self.import_batch_inner(updates.iter().copied(), true)
+    }
+
+    /// Shared execution, preserving the legacy batch's pending reporting separately
+    /// from the updates-only API's remaining-operations contract.
+    fn import_batch_inner<'a>(
+        &self,
+        bytes: impl IntoIterator<Item = &'a [u8]>,
+        exclude_applied_pending: bool,
+    ) -> LoroResult<ImportStatus> {
+        let mut success = VersionRange::default();
         let (options, txn) = self.implicit_commit_then_stop();
         // Why we should keep locking `txn` here
         //
@@ -1552,7 +1579,7 @@ impl LoroDoc {
         // process dies with the document untouched.
         let loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut err = None;
-            for (_meta, data) in meta_arr {
+            for data in bytes {
                 #[cfg(test)]
                 take_panic_at_batch_import_blob_for_test();
                 match guard.doc._import_with(data, Default::default()) {
@@ -1583,13 +1610,13 @@ impl LoroDoc {
                 // itself when the interrupted blob poisoned a doc lock; that document
                 // is unusable either way, so keep the original payload.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = guard.finish();
+                    let _ = guard.finish(exclude_applied_pending);
                 }));
                 std::panic::resume_unwind(payload);
             }
         };
 
-        let pending = guard.finish()?;
+        let pending = guard.finish(exclude_applied_pending)?;
         if let Some(err) = err {
             return Err(err);
         }
@@ -2543,7 +2570,7 @@ fn find_last_delete_op(oplog: &OpLog, id: ID, idx: ContainerIdx) -> Option<ID> {
     best.map(|(_, op_id)| op_id)
 }
 
-/// Cleanup for the critical section of [`LoroDoc::import_batch`].
+/// Cleanup for the shared critical section of both batch import APIs.
 ///
 /// `import_batch` force-detaches the document so each blob only touches the `OpLog`,
 /// then reattaches once at the end. Leaving that section without reattaching strands
@@ -2575,7 +2602,7 @@ impl BatchImportGuard<'_> {
     /// only here, because the blobs were imported while detached), the whole batch is
     /// rolled back out of the `OpLog` so the document stays attached and unchanged,
     /// and the state-apply error is returned.
-    fn finish(&mut self) -> LoroResult<VersionRange> {
+    fn finish(&mut self, exclude_applied_pending: bool) -> LoroResult<VersionRange> {
         #[cfg(debug_assertions)]
         {
             self.finished = true;
@@ -2587,7 +2614,13 @@ impl BatchImportGuard<'_> {
         let pending = {
             let mut oplog = doc.oplog.lock();
             oplog.batch_importing = false;
-            oplog.pending_changes.version_range()
+            // Read both pending entries and the applied VV under the same oplog
+            // lock, while still holding txn. Never re-query after guard cleanup.
+            if exclude_applied_pending {
+                oplog.pending_changes.version_range_since(oplog.vv())
+            } else {
+                oplog.pending_changes.version_range()
+            }
         };
 
         // The txn guard must stay held across the checkout, and the renew below must

@@ -548,12 +548,24 @@ pub struct ImportBlobMetadata {
     pub mode: EncodedBlobMode,
 }
 
+#[cfg(test)]
+thread_local! {
+    static IMPORT_BLOB_META_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn import_blob_meta_decode_count_for_test() -> usize {
+    IMPORT_BLOB_META_DECODE_COUNT.with(|count| count.get())
+}
+
 impl LoroDoc {
     /// Decodes the metadata for an imported blob from the provided bytes.
     pub fn decode_import_blob_meta(
         blob: &[u8],
         check_checksum: bool,
     ) -> LoroResult<ImportBlobMetadata> {
+        #[cfg(test)]
+        IMPORT_BLOB_META_DECODE_COUNT.with(|count| count.set(count.get() + 1));
         let parsed = parse_header_and_body(blob, check_checksum)?;
         match parsed.mode {
             EncodeMode::Auto => unreachable!(),

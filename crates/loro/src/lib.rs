@@ -426,6 +426,50 @@ impl LoroDoc {
         self.doc.import_batch(bytes)
     }
 
+    /// Import borrowed update blobs with one final state checkout when attached.
+    ///
+    /// Only the current `FastUpdates` format (produced by [`ExportMode::Updates`]
+    /// and [`ExportMode::UpdatesInRange`]) is accepted. Snapshots, including shallow
+    /// snapshots, and legacy formats are rejected. All headers and modes are checked
+    /// before importing; the normal decoder still validates checksums and bodies.
+    /// Blobs are processed in the supplied order, with missing dependencies handled
+    /// by the pending queue. Reversed, duplicate, and overlapping updates are allowed.
+    ///
+    /// Unlike [`Self::import_batch`], this does not decode metadata to sort blobs.
+    /// Borrowing avoids requiring callers to clone their input into owned `Vec`s;
+    /// decoding still copies/allocates internal data. This is not a zero-copy API.
+    ///
+    /// On success, `pending` describes **all** imported operations still absent from
+    /// the oplog at the end of this call, including earlier pending imports. This
+    /// applies to empty and single-blob calls too; empty input reports the current
+    /// remainder. Already-applied overlapping operations are excluded. Each peer's
+    /// [`VersionRange`] is a bounding interval, not an exact set of missing
+    /// dependencies or a count of pending blobs. `success` describes operations
+    /// applied during this call, including previously pending operations it unlocked.
+    ///
+    /// This finalizes the current auto-commit transaction and preserves an explicitly
+    /// detached document. It is **not an ACID or all-or-nothing import**: a checksum or
+    /// body error can leave other updates applied or pending, and processing may
+    /// continue after a blob fails. If the final checkout fails on an attached doc,
+    /// the shared batch guard rolls back the batch and restores attached mode.
+    /// Callers requiring isolation on any error should discard their candidate doc.
+    ///
+    /// # Example
+    /// ```
+    /// use loro::{ExportMode, LoroDoc};
+    /// let source = LoroDoc::new();
+    /// source.get_text("text").insert(0, "hello").unwrap();
+    /// let update = source.export(ExportMode::all_updates()).unwrap();
+    /// let target = LoroDoc::new();
+    /// let status = target.import_updates_batch(&[update.as_slice()]).unwrap();
+    /// assert!(status.pending.is_none());
+    /// assert_eq!(target.get_text("text").to_string(), "hello");
+    /// ```
+    #[inline]
+    pub fn import_updates_batch(&self, updates: &[&[u8]]) -> LoroResult<ImportStatus> {
+        self.doc.import_updates_batch(updates)
+    }
+
     /// Get a [Container] by container id.
     #[inline]
     pub fn get_container(&self, id: ContainerID) -> Option<Container> {

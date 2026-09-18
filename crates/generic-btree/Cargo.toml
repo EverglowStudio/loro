@@ -13,7 +13,8 @@ repository = "https://github.com/loro-dev/generic-btree"
 
 # Vendored into the loro workspace (fork of crates.io generic-btree 0.10.7) so we
 # can evolve the b-tree (e.g. deferred cache propagation). Redirected from
-# crates.io via [patch.crates.io] in the root Cargo.toml.
+# crates.io via [patch.crates-io] in the root Cargo.toml; Loro crates also use
+# direct path dependencies so Git consumers select this source.
 
 [features]
 test = []

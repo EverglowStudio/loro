@@ -12,7 +12,8 @@ keywords = ["rope"]
 
 [dependencies]
 arrayvec = "0.7.4"
-generic-btree = { version = "^0.10.7" }
+# Keep Git consumers on the same in-tree source as workspace builds.
+generic-btree = { path = "../generic-btree", version = "^0.10.7" }
 heapless = "0.8.0"
 enum-as-inner = "0.5.1"
 

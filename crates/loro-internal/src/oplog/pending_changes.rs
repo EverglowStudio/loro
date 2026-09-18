@@ -59,6 +59,29 @@ impl PendingChanges {
         Some(self.changes.get(&peer)?.get(&counter)?.len())
     }
 
+    /// Ranges of parked operations not already covered by the oplog. An overlapping
+    /// blob can apply operations while an older pending entry still contains them.
+    /// Trim each entry before merging: a fully covered entry must not widen a later
+    /// disjoint pending range from the same peer.
+    pub(crate) fn version_range_since(&self, vv: &VersionVector) -> VersionRange {
+        let mut range = VersionRange::default();
+        for tree in self.changes.values() {
+            for pending_changes in tree.values() {
+                for pending_change in pending_changes {
+                    let mut span = pending_change.id_span();
+                    span.counter.start = span
+                        .counter
+                        .start
+                        .max(vv.get(&span.peer).copied().unwrap_or(0));
+                    if span.counter.start < span.counter.end {
+                        range.extends_to_include_id_span(span);
+                    }
+                }
+            }
+        }
+        range
+    }
+
     pub(crate) fn version_range(&self) -> VersionRange {
         let mut range = VersionRange::default();
         for tree in self.changes.values() {
@@ -387,6 +410,86 @@ fn remote_change_apply_state(
 #[cfg(test)]
 mod test {
     use crate::{cursor::PosType, loro::ExportMode, LoroDoc, ToJson, VersionVector};
+
+    #[test]
+    fn import_updates_batch_excludes_covered_pending_entries_before_merging() {
+        use super::PendingChange;
+        use crate::encoding::{decode_oplog_changes, parse_header_and_body};
+        use loro_common::{IdSpan, ID};
+
+        let source = LoroDoc::new_auto_commit();
+        source.set_peer_id(1).unwrap();
+        source
+            .get_text("text")
+            .insert_unicode(0, "0123456789")
+            .unwrap();
+        let full = source.export(ExportMode::all_updates()).unwrap();
+        let prefix = source
+            .export(ExportMode::updates_in_range(vec![IdSpan::new(1, 0, 4)]))
+            .unwrap();
+
+        // A deterministic stale-queue fixture: park real decoded ranges under a
+        // missing foreign dep. They stay in the queue when another overlapping blob
+        // applies the same IDs. No decoder/CRDT behavior is changed for this test.
+        // Test a covered range separated by a gap from a later pending range too:
+        // merging before trimming would incorrectly report that gap as pending.
+        for (spans, expected) in [
+            (vec![(0, 2)], None),
+            (vec![(0, 6)], Some((4, 6))),
+            (vec![(0, 2), (8, 10)], Some((8, 10))),
+            (vec![(0, 6), (8, 10)], Some((4, 10))),
+        ] {
+            for size in [0, 1, 2] {
+                let target = LoroDoc::new_auto_commit();
+                for (start, end) in &spans {
+                    let blob = source
+                        .export(ExportMode::updates_in_range(vec![IdSpan::new(
+                            1, *start, *end,
+                        )]))
+                        .unwrap();
+                    let mut oplog = target.oplog.lock();
+                    let changes = decode_oplog_changes(
+                        &mut oplog,
+                        parse_header_and_body(&blob, true).unwrap(),
+                    )
+                    .unwrap();
+                    for change in changes {
+                        oplog.push_pending_change(ID::new(99, 0), PendingChange::Unknown(change));
+                    }
+                }
+                target.import(&prefix).unwrap();
+                let borrowed = vec![prefix.as_slice(); size];
+                let status = target.import_updates_batch(&borrowed).unwrap();
+                assert!(status.success.is_empty());
+                assert_eq!(
+                    status
+                        .pending
+                        .as_ref()
+                        .and_then(|range| range.get(&1))
+                        .copied(),
+                    expected
+                );
+                assert_eq!(status.pending.is_none(), expected.is_none());
+                assert_eq!(target.get_text("text").to_string(), "0123");
+
+                let status = target.import_updates_batch(&[&full]).unwrap();
+                assert!(
+                    status.pending.is_none(),
+                    "fully covered entries are not pending operations"
+                );
+                assert!(target.import_updates_batch(&[]).unwrap().pending.is_none());
+                assert_eq!(target.oplog_vv(), source.oplog_vv());
+                assert_eq!(target.get_deep_value(), source.get_deep_value());
+                // The queue representation and legacy reporting have NOT changed.
+                assert!(!target
+                    .oplog
+                    .lock()
+                    .pending_changes
+                    .version_range()
+                    .is_empty());
+            }
+        }
+    }
 
     #[test]
     fn import_pending() {
