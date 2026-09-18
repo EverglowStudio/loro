@@ -831,3 +831,133 @@ fn import_updates_batch_single_final_checkout_failure_restores_guard_state() {
     target.commit_then_renew();
     assert_eq!(target.state_frontiers(), target.oplog_frontiers());
 }
+
+fn richtext_diff_counts() -> (u64, u64) {
+    use crate::diff_calc::{CRDT_RICHTEXT_DIFF_COUNT, LINEAR_RICHTEXT_DIFF_COUNT};
+    (
+        LINEAR_RICHTEXT_DIFF_COUNT.with(|count| count.get()),
+        CRDT_RICHTEXT_DIFF_COUNT.with(|count| count.get()),
+    )
+}
+
+/// Reproduces the history materialization shape that regressed when a consumer
+/// switched from sequential imports to batching: three seed appends followed by
+/// tiny tail replacements. Fixture construction is outside the counted section.
+fn large_text_tail_edits() -> (LoroDoc, Vec<Vec<u8>>, Frontiers) {
+    let source = LoroDoc::new_auto_commit();
+    source.set_peer_id(42).unwrap();
+    let text = source.get_text("text");
+    let mut vv = VersionVector::default();
+    let mut blobs = Vec::new();
+    let mut first = Frontiers::default();
+    let mut len = 0;
+    for size in [24 * 1024, 48 * 1024, 64 * 1024] {
+        text.insert_unicode(len, &"s".repeat(size - len)).unwrap();
+        blobs.push(source.export(ExportMode::updates(&vv)).unwrap());
+        vv = source.oplog_vv();
+        if len == 0 {
+            first = source.oplog_frontiers();
+        }
+        len = size;
+    }
+    for i in 0..12 {
+        text.delete_unicode(len - 1, 1).unwrap();
+        text.insert_unicode(len - 1, if i % 2 == 0 { "a" } else { "b" })
+            .unwrap();
+        blobs.push(source.export(ExportMode::updates(&vv)).unwrap());
+        vv = source.oplog_vv();
+    }
+    (source, blobs, first)
+}
+
+#[test]
+fn batch_large_linear_text_uses_linear_diff_and_keeps_history_checkout_usable() {
+    let (source, blobs, first) = large_text_tail_edits();
+    for updates_only in [false, true] {
+        for reversed in [false, true] {
+            for seeded in [false, true] {
+                let target = LoroDoc::new_auto_commit();
+                if seeded {
+                    target.import(&blobs[0]).unwrap();
+                    // Populate a persistent tracker before the one-shot batch. Its
+                    // subsequent reuse must remain correct after the state advances.
+                    target.checkout(&Frontiers::default()).unwrap();
+                    target.checkout_to_latest();
+                }
+                let mut remaining = blobs[usize::from(seeded)..].to_vec();
+                if reversed {
+                    remaining.reverse();
+                }
+                let before = richtext_diff_counts();
+                let status = import_test_batch(&target, &remaining, updates_only).unwrap();
+                let after = richtext_diff_counts();
+                assert_eq!(after.0 - before.0, 1, "one linear richtext diff per batch");
+                assert_eq!(
+                    after.1 - before.1,
+                    0,
+                    "linear history needs no CRDT tracker"
+                );
+                assert!(status.pending.is_none());
+                assert_eq!(target.oplog_vv(), source.oplog_vv());
+                assert_eq!(target.get_deep_value(), source.get_deep_value());
+                assert_eq!(target.state_frontiers(), target.oplog_frontiers());
+                assert!(!target.is_detached());
+
+                let before_checkout = richtext_diff_counts();
+                target.checkout(&first).unwrap();
+                assert_eq!(target.get_text("text").to_string(), "s".repeat(24 * 1024));
+                target.checkout_to_latest();
+                assert!(
+                    richtext_diff_counts().1 > before_checkout.1,
+                    "real history checkout still exercises the persistent tracker"
+                );
+                assert_eq!(target.get_deep_value(), source.get_deep_value());
+                target.get_text("text").insert_unicode(0, "local").unwrap();
+                target.commit_then_renew();
+                assert_eq!(target.state_frontiers(), target.oplog_frontiers());
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_concurrent_text_uses_crdt_diff_and_matches_sequential_imports() {
+    let base = LoroDoc::new_auto_commit();
+    base.set_peer_id(1).unwrap();
+    base.get_text("text").insert_unicode(0, "abcdef").unwrap();
+    let seed = base.export(ExportMode::all_updates()).unwrap();
+    let vv = base.oplog_vv();
+    let left = base.fork();
+    left.set_peer_id(2).unwrap();
+    left.get_text("text").delete_unicode(1, 2).unwrap();
+    left.get_text("text").insert_unicode(1, "L").unwrap();
+    let left_update = left.export(ExportMode::updates(&vv)).unwrap();
+    let right = base.fork();
+    right.set_peer_id(3).unwrap();
+    right.get_text("text").insert_unicode(2, "R").unwrap();
+    let right_update = right.export(ExportMode::updates(&vv)).unwrap();
+    let expected = LoroDoc::new_auto_commit();
+    for blob in [&seed, &left_update, &right_update] {
+        expected.import(blob).unwrap();
+    }
+    for updates_only in [false, true] {
+        for seeded in [false, true] {
+            let target = LoroDoc::new_auto_commit();
+            let mut blobs = vec![right_update.clone(), left_update.clone()];
+            if seeded {
+                target.import(&seed).unwrap();
+            } else {
+                blobs.push(seed.clone());
+            }
+            let before = richtext_diff_counts();
+            let status = import_test_batch(&target, &blobs, updates_only).unwrap();
+            let after = richtext_diff_counts();
+            assert_eq!(after.0, before.0, "concurrency cannot be treated as linear");
+            assert!(after.1 > before.1);
+            assert!(status.pending.is_none());
+            assert_eq!(target.get_deep_value(), expected.get_deep_value());
+            assert_eq!(target.oplog_vv(), expected.oplog_vv());
+            assert!(!target.is_detached());
+        }
+    }
+}

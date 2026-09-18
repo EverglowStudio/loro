@@ -164,3 +164,78 @@ fn legacy_empty_single_and_mixed_snapshot_batch_keep_their_contracts() {
     assert_eq!(mixed.oplog_vv(), source.oplog_vv());
     assert_eq!(mixed.get_deep_value(), source.get_deep_value());
 }
+
+#[test]
+fn batch_linear_richtext_preserves_styles_and_one_checkout_notification() {
+    use loro::EventTriggerKind;
+    use std::sync::{Arc, Mutex};
+
+    let source = LoroDoc::new();
+    source.set_peer_id(1).unwrap();
+    let text = source.get_text("body");
+    text.insert(0, "hello world").unwrap();
+    let first = source.export(ExportMode::all_updates()).unwrap();
+    let vv = source.oplog_vv();
+    text.mark(0..5, "bold", true).unwrap();
+    text.delete(10, 1).unwrap();
+    text.insert(10, "!").unwrap();
+    let second = source.export(ExportMode::updates(&vv)).unwrap();
+    let target = LoroDoc::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let _subscription = target.subscribe_root(Arc::new(move |event| {
+        captured
+            .lock()
+            .unwrap()
+            .push((event.triggered_by, event.origin.to_owned()));
+    }));
+    let status = target.import_updates_batch(&[&second, &first]).unwrap();
+    assert!(status.pending.is_none());
+    assert_eq!(target.oplog_vv(), source.oplog_vv());
+    assert_eq!(target.get_deep_value(), source.get_deep_value());
+    assert_eq!(target.get_text("body").to_delta(), text.to_delta());
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        &[(EventTriggerKind::Checkout, "checkout".to_owned())]
+    );
+    target.import_updates_batch(&[&first, &second]).unwrap();
+    target.import_updates_batch(&[]).unwrap();
+    assert_eq!(
+        events.lock().unwrap().len(),
+        1,
+        "duplicates and empty input emit no new state event"
+    );
+}
+
+#[test]
+fn batch_on_shallow_text_preserves_the_existing_import_path() {
+    let source = LoroDoc::new();
+    source.set_peer_id(1).unwrap();
+    source.get_text("body").insert(0, "seed text").unwrap();
+    source.commit();
+    let shallow = source
+        .export(ExportMode::shallow_snapshot(&source.oplog_frontiers()))
+        .unwrap();
+    let mut vv = source.oplog_vv();
+    let mut updates = Vec::new();
+    for suffix in ["a", "b", "c"] {
+        let text = source.get_text("body");
+        text.delete(text.len_unicode() - 1, 1).unwrap();
+        text.insert(text.len_unicode(), suffix).unwrap();
+        updates.push(source.export(ExportMode::updates(&vv)).unwrap());
+        vv = source.oplog_vv();
+    }
+    let expected = LoroDoc::new();
+    expected.import(&shallow).unwrap();
+    for update in &updates {
+        expected.import(update).unwrap();
+    }
+    let target = LoroDoc::new();
+    target.import(&shallow).unwrap();
+    let borrowed: Vec<_> = updates.iter().rev().map(Vec::as_slice).collect();
+    let status = target.import_updates_batch(&borrowed).unwrap();
+    assert!(status.pending.is_none());
+    assert_eq!(target.oplog_vv(), expected.oplog_vv());
+    assert_eq!(target.get_deep_value(), expected.get_deep_value());
+    assert_eq!(target.state_frontiers(), target.oplog_frontiers());
+}

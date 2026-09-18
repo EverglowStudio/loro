@@ -1673,6 +1673,7 @@ impl LoroDoc {
             to_commit_then_renew,
             "checkout".into(),
             EventTriggerKind::Checkout,
+            false,
         )
     }
 
@@ -1685,6 +1686,7 @@ impl LoroDoc {
             to_commit_then_renew,
             origin,
             EventTriggerKind::Import,
+            false,
         )
     }
 
@@ -1693,6 +1695,7 @@ impl LoroDoc {
         to_commit_then_renew: bool,
         origin: InternalString,
         triggered_by: EventTriggerKind,
+        use_import_diff: bool,
     ) -> LoroResult<()> {
         tracing::info_span!("CheckoutToLatest", peer = self.peer_id()).in_scope(|| {
             let f = self.oplog_frontiers();
@@ -1704,6 +1707,7 @@ impl LoroDoc {
                 to_commit_then_renew,
                 origin,
                 triggered_by,
+                use_import_diff,
             )?;
             // We don't need to shrink frontiers because oplog's frontiers are already shrinked.
             this.emit_events();
@@ -1758,6 +1762,7 @@ impl LoroDoc {
             to_commit_then_renew,
             "checkout".into(),
             EventTriggerKind::Checkout,
+            false,
         )
     }
 
@@ -1768,6 +1773,7 @@ impl LoroDoc {
         _to_commit_then_renew: bool,
         origin: InternalString,
         triggered_by: EventTriggerKind,
+        use_import_diff: bool,
     ) -> Result<(), LoroError> {
         if !self.txn.is_locked() {
             return Err(LoroError::TransactionError(
@@ -1805,7 +1811,20 @@ impl LoroDoc {
         }
 
         let mut state = self.state.lock();
-        let mut calc = self.diff_calculator.lock();
+        let mut cached_calc = self.diff_calculator.lock();
+        let mut import_calc;
+        let calc = if use_import_diff {
+            // Batch finalization is one state advance, like an attached import.
+            // A persistent calculator forces Checkout mode even when the DAG proves
+            // Linear, needlessly building/rewinding a full richtext tracker. Let a
+            // one-shot calculator choose the existing modes from causal history.
+            // Real concurrency and shallow-history safety still use their usual
+            // paths; the persistent cache remains available for history checkout.
+            import_calc = DiffCalculator::new(false);
+            &mut import_calc
+        } else {
+            &mut *cached_calc
+        };
         for i in frontiers.iter() {
             if !oplog.dag.contains(i) {
                 return Err(LoroError::FrontiersNotFound(i));
@@ -2629,7 +2648,12 @@ impl BatchImportGuard<'_> {
         // flight poisons the mutex.
         let mut checkout = Ok(());
         if self.was_attached {
-            checkout = doc._checkout_to_latest_without_commit(true);
+            checkout = doc._checkout_to_latest_without_commit_with_event(
+                true,
+                "checkout".into(),
+                EventTriggerKind::Checkout,
+                true,
+            );
             if let Err(e) = &checkout {
                 // `DocState::apply_diff` validates before mutating, so the state is
                 // still at its pre-batch version; undoing the batch in the `OpLog`

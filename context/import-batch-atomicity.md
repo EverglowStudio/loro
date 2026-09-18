@@ -195,3 +195,64 @@ The example emits 1 configuration line plus 144 measurement lines (24 warmups,
 120 samples), with per-invocation microseconds and milliseconds. It reports no
 allocation metric. Correctness/performance results remain unverified until these
 commands are run by the integrating agent.
+
+## Batch finalization and forward diff calculation (2026-09-18)
+
+Source investigation at `a40b7cca` found why batching a linear large-text history
+could be slower than importing each update while attached. The attached import
+path creates `DiffCalculator::new(false)`. Batch finalization instead used the
+persistent document calculator through checkout. `calc_diff_internal` forces a
+persistent calculator's effective mode to `Checkout`, even when the existing DAG
+analysis returns `Linear`. Richtext then builds a tracker and rewinds/advances it
+for the diff; the reported native profile identifies `Tracker::__checkout` and
+`IdToCursor::update_insert_batch` under this path.
+
+`BatchImportGuard::finish` now requests a one-shot calculator for its final state
+advance through the same checkout/event helper. The DAG still decides the mode:
+linear causal histories can use the existing richtext delta composition, while
+concurrent or shallow histories retain their normal safety paths. This decision
+has no text-size threshold and does not change the DAG, tracker, encoding or
+CRDT algorithms. Ordinary user history checkout still uses the persistent cache;
+its lock order is preserved, and subsequent checkout remains available after a
+one-shot batch advance.
+
+The batch still force-detaches under the txn mutex, decodes through the normal
+path, applies state once at the end, emits the existing `Checkout` / `checkout`
+notification, and renews the transaction through the guard. Pending calculation
+and decode-error behavior are unchanged. Final state-validation failure still
+rolls back the batch, restores attachment, and clears the persistent calculator.
+Both batch APIs share this finalization; their input and status contracts remain
+unchanged.
+
+New regression assertions cover the 24/48/64 KiB seed followed by twelve tail
+replacements, ordered/reversed input, empty/nonempty targets, persistent cache
+reuse across subsequent history checkout, concurrent text, richtext styles,
+shallow targets, and one notification. Thread-local counters record the effective
+richtext computation mode, providing deterministic evidence that the linear
+batch avoids the tracker and that real concurrency/history checkout still uses
+it. The original guard rollback, panic, checksum/body and pending regressions
+remain applicable.
+
+The native example retains all six original cases and adds ordered/reversed
+large-text cases with three strategies: `import_batch`, `import_updates_batch`,
+and sequential `import`. The new fixture consists of three incremental seed
+appends to 24/48/64 KiB and twelve single-byte tail replacements (15 blobs total).
+All strategies share the Vec-backed input and full VV/body/status/attachment
+assertions. Warmup 2 and samples 10 remain unchanged. New records carry
+`scenario = "large_text_tail_replace"`; old measurement fields and alternating
+schedule remain unchanged. Output is now one configuration line plus 216
+measurements (36 warmups, 180 samples). Fixture generation, teardown and JSON
+output remain outside timing. No runtime or allocation improvement is claimed
+until the integrating agent executes the tests and samples.
+
+Validation commands remain those above. The `import_atomicity` filter also runs
+the new `batch_large_linear_text_uses_linear_diff_and_keeps_history_checkout_usable`
+and `batch_concurrent_text_uses_crdt_diff_and_matches_sequential_imports` tests.
+Also run the existing replay-base regressions for the changed finalization path:
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --locked -p loro-internal --lib tests::replay_base -j 2
+```
+
+This follow-up was only formatted and statically inspected by its implementation
+agent; no build, tests, sampling, commit or push was performed.

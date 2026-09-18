@@ -506,6 +506,11 @@ thread_local! {
     /// other's counts (diff calc runs on the importing thread).
     pub(crate) static FULL_TRACKER_REBUILD_COUNT: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
+    /// Effective richtext computation modes, not just the DAG's direction mode.
+    pub(crate) static LINEAR_RICHTEXT_DIFF_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static CRDT_RICHTEXT_DIFF_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[enum_dispatch(DiffCalculatorTrait)]
@@ -1521,12 +1526,16 @@ impl DiffCalculatorTrait for RichtextDiffCalculator {
     ) {
         match mode {
             DiffMode::Linear => {
+                #[cfg(test)]
+                LINEAR_RICHTEXT_DIFF_COUNT.with(|count| count.set(count.get() + 1));
                 *self.mode = RichtextCalcMode::Linear {
                     diff: DeltaRope::new(),
                     last_style_start: None,
                 };
             }
             _ => {
+                #[cfg(test)]
+                CRDT_RICHTEXT_DIFF_COUNT.with(|count| count.set(count.get() + 1));
                 if !matches!(&*self.mode, RichtextCalcMode::Crdt { .. }) {
                     unreachable!();
                 }
