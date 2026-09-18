@@ -743,11 +743,13 @@ pub enum ContainerType {
     #[cfg(feature = "counter")]
     Counter,
     Unknown(u8),
+    Graph,
 }
 
 impl ContainerType {
     #[cfg(feature = "counter")]
-    pub const ALL_TYPES: [ContainerType; 6] = [
+    pub const ALL_TYPES: [ContainerType; 7] = [
+        ContainerType::Graph,
         ContainerType::Map,
         ContainerType::List,
         ContainerType::Text,
@@ -756,7 +758,8 @@ impl ContainerType {
         ContainerType::Counter,
     ];
     #[cfg(not(feature = "counter"))]
-    pub const ALL_TYPES: [ContainerType; 5] = [
+    pub const ALL_TYPES: [ContainerType; 6] = [
+        ContainerType::Graph,
         ContainerType::Map,
         ContainerType::List,
         ContainerType::Text,
@@ -770,6 +773,7 @@ impl ContainerType {
             ContainerType::List => LoroValue::List(Default::default()),
             ContainerType::Text => LoroValue::String(Default::default()),
             ContainerType::Tree => LoroValue::List(Default::default()),
+            ContainerType::Graph => LoroValue::Map(Default::default()),
             ContainerType::MovableList => LoroValue::List(Default::default()),
             #[cfg(feature = "counter")]
             ContainerType::Counter => LoroValue::Double(0.),
@@ -786,6 +790,7 @@ impl ContainerType {
             ContainerType::MovableList => 4,
             #[cfg(feature = "counter")]
             ContainerType::Counter => 5,
+            ContainerType::Graph => 6,
             ContainerType::Unknown(k) => k,
         }
     }
@@ -799,6 +804,7 @@ impl ContainerType {
             4 => Ok(ContainerType::MovableList),
             #[cfg(feature = "counter")]
             5 => Ok(ContainerType::Counter),
+            6 => Ok(ContainerType::Graph),
             x => Ok(ContainerType::Unknown(x)),
         }
     }
@@ -815,6 +821,7 @@ enum ContainerTypeSerdeRepr {
     #[cfg(feature = "counter")]
     Counter,
     Unknown(u8),
+    Graph,
 }
 
 // For some historical reason, we have another to_byte format for ContainerType,
@@ -828,6 +835,7 @@ fn historical_container_type_to_byte(c: ContainerType) -> u8 {
         ContainerType::Tree => 4,
         #[cfg(feature = "counter")]
         ContainerType::Counter => 5,
+        ContainerType::Graph => 6,
         ContainerType::Unknown(k) => k,
     }
 }
@@ -841,6 +849,7 @@ fn historical_try_byte_to_container(byte: u8) -> ContainerType {
         4 => ContainerType::Tree,
         #[cfg(feature = "counter")]
         5 => ContainerType::Counter,
+        6 => ContainerType::Graph,
         _ => ContainerType::Unknown(byte),
     }
 }
@@ -853,6 +862,7 @@ impl From<ContainerType> for ContainerTypeSerdeRepr {
             ContainerType::List => Self::List,
             ContainerType::MovableList => Self::MovableList,
             ContainerType::Tree => Self::Tree,
+            ContainerType::Graph => Self::Graph,
             #[cfg(feature = "counter")]
             ContainerType::Counter => Self::Counter,
             ContainerType::Unknown(value) => Self::Unknown(value),
@@ -868,6 +878,7 @@ impl From<ContainerTypeSerdeRepr> for ContainerType {
             ContainerTypeSerdeRepr::List => ContainerType::List,
             ContainerTypeSerdeRepr::MovableList => ContainerType::MovableList,
             ContainerTypeSerdeRepr::Tree => ContainerType::Tree,
+            ContainerTypeSerdeRepr::Graph => ContainerType::Graph,
             #[cfg(feature = "counter")]
             ContainerTypeSerdeRepr::Counter => ContainerType::Counter,
             ContainerTypeSerdeRepr::Unknown(value) => ContainerType::Unknown(value),
@@ -916,6 +927,7 @@ mod container {
                 ContainerType::MovableList => "MovableList",
                 ContainerType::Text => "Text",
                 ContainerType::Tree => "Tree",
+                ContainerType::Graph => "Graph",
                 #[cfg(feature = "counter")]
                 ContainerType::Counter => "Counter",
                 ContainerType::Unknown(k) => return f.write_fmt(format_args!("Unknown({k})")),
@@ -1120,6 +1132,7 @@ mod container {
                 "List" | "list" => Ok(ContainerType::List),
                 "Text" | "text" => Ok(ContainerType::Text),
                 "Tree" | "tree" => Ok(ContainerType::Tree),
+                "Graph" | "graph" => Ok(ContainerType::Graph),
                 "MovableList" | "movableList" => Ok(ContainerType::MovableList),
                 #[cfg(feature = "counter")]
                 "Counter" | "counter" => Ok(ContainerType::Counter),
@@ -1519,3 +1532,40 @@ mod test {
         assert!(ContainerID::try_from_bytes(&root_bytes).is_err());
     }
 }
+
+/// Stable identity of a graph object, allocated by its unique creation operation.
+/// Graph APIs validate that the identity belongs to the receiving graph.
+macro_rules! graph_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+        #[doc = concat!("A stable graph identity ordered by `(peer, counter)`: `", stringify!($name), "`.")]
+        pub struct $name { pub peer: PeerID, pub counter: Counter }
+        impl $name {
+            pub fn new(peer: PeerID, counter: Counter) -> Self { Self { peer, counter } }
+            pub fn from_id(id: ID) -> Self { Self::new(id.peer, id.counter) }
+            pub fn id(self) -> ID { ID::new(self.peer, self.counter) }
+            pub fn associated_meta_container(self) -> ContainerID { ContainerID::new_normal(self.id(), ContainerType::Map) }
+        }
+        impl Serialize for $name {
+            fn serialize<S:serde::Serializer>(&self,s:S)->Result<S::Ok,S::Error>{
+                if s.is_human_readable(){s.serialize_str(&self.to_string())}else{(self.peer,self.counter).serialize(s)}
+            }
+        }
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error>{
+                if d.is_human_readable(){let s=String::deserialize(d)?;Self::try_from(s.as_str()).map_err(serde::de::Error::custom)}else{let(peer,counter)=<(PeerID,Counter)>::deserialize(d)?;Ok(Self::new(peer,counter))}
+            }
+        }
+        impl Display for $name { fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { self.id().fmt(f) } }
+        impl TryFrom<&str> for $name {
+            type Error = LoroError;
+            fn try_from(s:&str)->LoroResult<Self> {
+                let id=ID::try_from(s)?;
+                if id.counter < 0 { return Err(LoroError::ArgErr("Negative graph object counter".into())); }
+                Ok(Self::from_id(id))
+            }
+        }
+    };
+}
+graph_id!(GraphNodeId);
+graph_id!(GraphEdgeId);

@@ -119,6 +119,7 @@ mod encode {
                 key as i32
             }
             crate::op::InnerContent::Tree(_) => 0,
+            crate::op::InnerContent::Graph(_) => 0,
             crate::op::InnerContent::Future(f) => get_future_op_prop(f),
         }
     }
@@ -188,6 +189,9 @@ mod encode {
                     Some(v) => Value::LoroValue(v.clone()),
                     None => Value::DeleteOnce,
                 }
+            }
+            crate::op::InnerContent::Graph(op) => {
+                Value::LoroValue(loro_common::LoroValue::Binary(op.encoded().into()))
             }
             crate::op::InnerContent::Tree(t) => {
                 assert_eq!(op.container.get_type(), ContainerType::Tree);
@@ -329,6 +333,20 @@ pub(crate) fn decode_op(
                 }
                 _ => return Err(LoroError::DecodeDataCorruptionError),
             }
+        }
+        ContainerType::Graph => {
+            let bytes = match value {
+                Value::Binary(b) => b,
+                Value::LoroValue(loro_common::LoroValue::Binary(b)) => {
+                    return Ok(crate::op::InnerContent::Graph(Arc::new(
+                        crate::container::graph::GraphOp::decode(&b, op_id)?,
+                    )));
+                }
+                _ => return Err(LoroError::DecodeDataCorruptionError),
+            };
+            crate::op::InnerContent::Graph(Arc::new(crate::container::graph::GraphOp::decode(
+                bytes, op_id,
+            )?))
         }
         ContainerType::Tree => match value {
             Value::TreeMove(op) => crate::op::InnerContent::Tree(Arc::new(

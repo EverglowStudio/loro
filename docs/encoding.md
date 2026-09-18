@@ -3,6 +3,12 @@
 Verified against code 2026-07-17 at commit
 `fd5a1fdab79142302f0c0fbceb8807128ec6d9cd`.
 
+The [native Graph extension](encoding-graph.md), verified against the fork on
+2026-09-19, adds container tag `6`, Graph operation/state payloads and Graph
+JSON updates without changing the envelope or the existing type assignments.
+The Graph entries below refer to that extension; the original verification
+date and commit above still identify the base-format reference.
+
 This is the normative wire-format reference for the binary formats currently
 written by Loro:
 
@@ -272,6 +278,10 @@ The state sections initialize a document only when
 ChangeStore and the state sections atomically. If `state_bytes` is `E`, a
 shallow snapshot initializes at `S` and checks out to the retained history's
 latest version.
+
+Pending operations also prevent direct initialization, even when the applied
+DAG is empty. The change path can unlock them when the snapshot supplies
+their missing dependencies; see [Graph import behavior](encoding-graph.md#52-causal-references-and-pending-changes).
 
 When importing the same mode-3 blob into a non-empty or detached document, Loro
 uses only the encoded ChangeStore as incoming changes; the two state sections
@@ -782,8 +792,9 @@ repeat container_count times:
 For a root container, `peer_index` is zero and `key_or_counter` is an index in
 `keys`. For a normal container, `peer_index` indexes the block peer table and
 `key_or_counter` is the container's creation counter. Container kind tags are
-`0 Map`, `1 List`, `2 Text`, `3 Tree`, `4 MovableList`, and `5 Counter` when the
-counter feature is enabled; other `u8` values are preserved as unknown kinds.
+`0 Map`, `1 List`, `2 Text`, `3 Tree`, `4 MovableList`, `5 Counter` when the
+counter feature is enabled, and `6 Graph` in this fork. Other `u8` values are
+preserved as unknown kinds. See [Graph tags](encoding-graph.md#1-container-tags-and-identities).
 
 The leading `container_count` comes from the ordinary postcard `Vec`. The
 per-row `4` comes from `EncodedContainer`'s generated `Serialize` sequence. It
@@ -883,6 +894,7 @@ wrapper and reader:
 | MovableList set | `0` | 15 `ListSet` | peer-table index and Lamport identifying the element, then nested value |
 | Tree create/move/delete | `0` | 16 `RawTreeMove` | raw tree payload; delete names the reserved deleted root as parent |
 | Counter delta, counter feature | `0` | 3 `I64` or 4 `F64` | exact tag-selection rule below |
+| Graph create/delete/restore | `0` | 11 `LoroValue` | nested Binary containing postcard `GraphOp`; see [Graph payload](encoding-graph.md#2-graph-operations-in-current-binary-change-blocks) |
 | Unknown container operation | preserved opaque `i32` | preserved `OwnedValue` kind | kind-specific payload |
 
 The canonical `len` column is semantic atom count, not payload size:
@@ -892,7 +904,7 @@ The canonical `len` column is semantic atom count, not payload size:
 - Text, List, or MovableList `DeleteSeq`: `signed_len.unsigned_abs()` from its
   delete-start row; and
 - every other operation row in the table, including style anchors, move/set,
-  Map, Tree, Counter, and Unknown operations: `1`.
+  Map, Tree, Counter, Graph, and Unknown operations: `1`.
 
 In particular, MarkStart's mark length and a string's UTF-8 byte length are not
 the operation `len`. Length definitions:
@@ -1146,7 +1158,8 @@ State section entries are:
 layers, removes the root `fr`, and only then scans and registers live container
 state. Container keys and values, including every container-specific state
 codec, are specified in
-[encoding-container-states.md](./encoding-container-states.md).
+[encoding-container-states.md](./encoding-container-states.md) and the
+[Graph state extension](encoding-graph.md#3-fastsnapshot-state-and-shallow-snapshots).
 
 Schema and root key:
 [`container_store.rs::FRONTIERS_KEY`](../crates/loro-internal/src/state/container_store.rs#L48-L49),

@@ -234,6 +234,7 @@ pub(super) enum EventHint {
     },
     // use vec because we could bring back some node that has children
     Tree(SmallVec<[TreeDiffItem; 1]>),
+    Graph(crate::container::graph::GraphDiff),
     MarkEnd,
     #[cfg(feature = "counter")]
     Counter(f64),
@@ -251,6 +252,7 @@ impl generic_btree::rle::HasLength for EventHint {
             EventHint::DeleteList(d) => d.len(),
             EventHint::Map { .. } => 1,
             EventHint::Tree(_) => 1,
+            EventHint::Graph(_) => 1,
             EventHint::MarkEnd => 1,
             EventHint::Move { .. } => 1,
             EventHint::SetList { .. } => 1,
@@ -924,6 +926,12 @@ fn change_to_diff(
                                 idlp: IdLp::new(peer, lamport),
                             },
                         )),
+                    });
+                }
+                EventHint::Graph(diff) => {
+                    ans.push(TxnContainerDiff {
+                        idx: container_idx,
+                        diff: Diff::Graph(diff),
                     });
                 }
                 EventHint::Tree(tree_diff) => {

@@ -373,6 +373,9 @@ fn storage_blobs_and_json_schema_roundtrip_state_and_metadata() -> anyhow::Resul
                 JsonOpContent::Tree(_) => {
                     op_kinds.insert("tree");
                 }
+                JsonOpContent::Graph(_) => {
+                    op_kinds.insert("graph");
+                }
                 JsonOpContent::Future(_) => {
                     op_kinds.insert("future");
                 }

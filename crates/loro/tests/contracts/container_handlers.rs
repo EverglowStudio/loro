@@ -21,6 +21,7 @@ fn container_name(container: &Container) -> &'static str {
         Container::Map(_) => "map",
         Container::Text(_) => "text",
         Container::Tree(_) => "tree",
+        Container::Graph(_) => "graph",
         Container::MovableList(_) => "movable_list",
         Container::Unknown(_) => "unknown",
         #[cfg(feature = "counter")]

@@ -1,4 +1,5 @@
 pub mod container_tree;
+pub(crate) mod graph_state;
 
 use crate::sync::{AtomicU64, Mutex, RwLock};
 #[cfg(test)]
@@ -78,6 +79,10 @@ fn visible_container_value_is_empty(kind: ContainerType, value: &LoroValue) -> b
             value.is_empty_collection()
         }
         ContainerType::Tree => value.as_list().is_some_and(|value| value.is_empty()),
+        ContainerType::Graph => value.as_map().is_some_and(|m| {
+            m.values()
+                .all(|v| v.as_list().is_some_and(|v| v.is_empty()))
+        }),
         #[cfg(feature = "counter")]
         ContainerType::Counter => false,
         ContainerType::Unknown(_) => false,
@@ -357,6 +362,7 @@ impl<T: ContainerState> ContainerState for Box<T> {
 #[enum_dispatch(ContainerState)]
 #[derive(EnumAsInner, Debug)]
 pub enum State {
+    GraphState(Box<graph_state::GraphState>),
     ListState(Box<ListState>),
     MovableListState(Box<MovableListState>),
     MapState(Box<MapState>),
@@ -432,6 +438,7 @@ impl State {
             State::MapState(s) => s.encode_snapshot_fast(&mut w),
             State::RichtextState(s) => s.encode_snapshot_fast(&mut w),
             State::TreeState(s) => s.encode_snapshot_fast(&mut w),
+            State::GraphState(s) => s.encode_snapshot_fast(&mut w),
             #[cfg(feature = "counter")]
             State::CounterState(s) => s.encode_snapshot_fast(&mut w),
             State::UnknownState(s) => s.encode_snapshot_fast(&mut w),
@@ -449,6 +456,7 @@ impl State {
                 State::RichtextState(richtext_state.fork(config))
             }
             State::TreeState(tree_state) => State::TreeState(tree_state.fork(config)),
+            State::GraphState(s) => State::GraphState(s.fork(config)),
             #[cfg(feature = "counter")]
             State::CounterState(counter_state) => State::CounterState(counter_state.fork(config)),
             State::UnknownState(unknown_state) => State::UnknownState(unknown_state.fork(config)),
@@ -516,6 +524,13 @@ impl DocState {
 
         self.event_recorder.recording_diff = true;
         self.event_recorder.diff_start_version = Some(self.frontiers.clone());
+    }
+
+    /// Record operations to apply as edits, rather than full graph metadata
+    /// needed to reconstruct a subscriber's visible rows after revival.
+    pub(crate) fn start_recording_for_edit(&mut self) {
+        self.start_recording();
+        self.event_recorder.for_edit = true;
     }
 
     #[inline(always)]
@@ -634,6 +649,7 @@ impl DocState {
         }
 
         let is_recording = self.is_recording();
+        let for_edit = self.event_recorder.for_edit;
         let Cow::Owned(mut diffs) = std::mem::take(&mut diff.diff) else {
             unreachable!()
         };
@@ -726,6 +742,7 @@ impl DocState {
                             to_revive_in_this_layer.insert(cid);
                         },
                         &self.arena,
+                        for_edit,
                     );
 
                     diffs.push(InternalContainerDiff {
@@ -752,6 +769,7 @@ impl DocState {
                                 to_revive_in_next_layer.insert(cid);
                             },
                             &self.arena,
+                            for_edit,
                         );
                         diff.diff = extern_diff.into();
                     }
@@ -792,6 +810,7 @@ impl DocState {
                                         to_revive_in_next_layer.insert(cid);
                                     },
                                     &self.arena,
+                                    for_edit,
                                 );
                                 diff.diff = external_diff.into();
                             } else {
@@ -832,6 +851,7 @@ impl DocState {
                         to_revive_in_next_layer.insert(cid);
                     },
                     &self.arena,
+                    for_edit,
                 );
 
                 if !external_diff.is_empty() {
@@ -894,6 +914,15 @@ impl DocState {
                     };
                     if let LoroValue::Container(c) = value {
                         to_ensure.push(c.clone());
+                    }
+                }
+            }
+            InternalDiff::Graph(delta) => {
+                for c in &delta.ops {
+                    if c.forward {
+                        if let Some(id) = c.op.created_meta() {
+                            to_ensure.push(id);
+                        }
                     }
                 }
             }
@@ -1468,13 +1497,21 @@ impl DocState {
         id: Option<ContainerID>,
     ) -> LoroValue {
         let id = id.unwrap_or_else(|| self.arena.idx_to_id(container).unwrap());
-        let Some(value) = self.store.get_value_ephemeral(container) else {
+        let Some(mut value) = self.store.get_value_ephemeral(container) else {
             return container.get_type().default_value();
         };
+        if container.get_type() == ContainerType::Graph {
+            self.resolve_graph_metadata(&mut value, true);
+            return crate::fx_map!("cid".to_string()=>id.to_string().into(),"value".to_string()=>value).into();
+        }
         // The `cid` is the container id's Display string, the same form that the
         // JS `container.id` getter returns (e.g. `cid:root-map:Map`,
         // `cid:92@2311024965712536503:Map`).
         let cid_str = LoroValue::String(id.to_string().into());
+        if container.get_type() == ContainerType::Graph {
+            self.resolve_graph_metadata(&mut value, false);
+            return value;
+        }
         match value {
             LoroValue::Container(_) => unreachable!(),
             LoroValue::List(mut list) => {
@@ -1558,10 +1595,36 @@ impl DocState {
         }
     }
 
+    fn resolve_graph_metadata(&mut self, value: &mut LoroValue, with_id: bool) {
+        if let LoroValue::Map(tables) = value {
+            for table in tables.make_mut().values_mut() {
+                if let LoroValue::List(rows) = table {
+                    for row in rows.make_mut() {
+                        if let LoroValue::Map(fields) = row {
+                            if let Some(LoroValue::Container(cid)) = fields.get("meta") {
+                                let cid = cid.clone();
+                                let idx = self.arena.register_container(&cid);
+                                let meta = if with_id {
+                                    self.get_container_deep_value_with_id(idx, Some(cid))
+                                } else {
+                                    self.get_container_deep_value(idx)
+                                };
+                                fields.make_mut().insert("meta".into(), meta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     pub fn get_container_deep_value(&mut self, container: ContainerIdx) -> LoroValue {
-        let Some(value) = self.store.get_value_ephemeral(container) else {
+        let Some(mut value) = self.store.get_value_ephemeral(container) else {
             return container.get_type().default_value();
         };
+        if container.get_type() == ContainerType::Graph {
+            self.resolve_graph_metadata(&mut value, false);
+            return value;
+        }
         match value {
             LoroValue::Container(_) => unreachable!(),
             LoroValue::List(mut list) => {
@@ -1798,6 +1861,17 @@ impl DocState {
         };
         self.validate_alive_parent_with_encoded(idx, expected_parent, Some(encoded_parent))?;
 
+        if idx.get_type() == ContainerType::Graph {
+            let children = self
+                .store
+                .get_container_mut(idx)
+                .expect("decoded graph")
+                .get_child_containers();
+            for child in children {
+                self.register_alive_child(idx, &child, ans);
+            }
+            return Ok(());
+        }
         match value {
             LoroValue::Container(_) => unreachable!(),
             LoroValue::List(list) => {
@@ -1904,6 +1978,30 @@ impl DocState {
                 *last_container_diff = prev.compose(container_diff.diff).unwrap();
             }
         }
+        // Graph record upserts rebuild their metadata slot. Complete the subtree
+        // after composing the event batch so local restores also revive children,
+        // and multiple full Text/List diffs are never composed as repeated inserts.
+        // Only changed visible records are seeds; graph relations are not owners.
+        let mut to_revive = Vec::new();
+        let for_edit = self.event_recorder.for_edit;
+        for (diff, _) in containers.values() {
+            if let crate::event::DiffVariant::External(diff @ Diff::Graph(_)) = diff {
+                trigger_on_new_container(diff, |idx| to_revive.push(idx), &self.arena, for_edit);
+            }
+        }
+        let mut revived = FxHashSet::default();
+        while let Some(idx) = to_revive.pop() {
+            if !revived.insert(idx) {
+                continue;
+            }
+            let Some(path) = self.get_path(idx) else {
+                continue;
+            };
+            let diff = self.store.get_or_create_mut(idx).to_diff(&self.doc);
+            trigger_on_new_container(&diff, |idx| to_revive.push(idx), &self.arena, for_edit);
+            containers.insert(idx, (diff.into(), path));
+        }
+
         let mut diff: Vec<_> = containers
             .into_iter()
             .map(|(container, (diff, path))| {
@@ -2127,7 +2225,10 @@ impl DocState {
                 State::ListState(s) => s.get_index_of_id(id),
                 State::RichtextState(s) => s.get_text_index_of_id(id, use_event_index),
                 State::MovableListState(s) => s.get_index_of_id(id),
-                State::MapState(_) | State::TreeState(_) | State::UnknownState(_) => unreachable!(),
+                State::MapState(_)
+                | State::TreeState(_)
+                | State::GraphState(_)
+                | State::UnknownState(_) => unreachable!(),
                 #[cfg(feature = "counter")]
                 State::CounterState(_) => unreachable!(),
             }
@@ -2144,7 +2245,10 @@ impl DocState {
                     s.len_unicode()
                 }),
                 State::MovableListState(s) => Some(s.len()),
-                State::MapState(_) | State::TreeState(_) | State::UnknownState(_) => unreachable!(),
+                State::MapState(_)
+                | State::TreeState(_)
+                | State::GraphState(_)
+                | State::UnknownState(_) => unreachable!(),
                 #[cfg(feature = "counter")]
                 State::CounterState(_) => unreachable!(),
             }
@@ -2212,6 +2316,14 @@ impl DocState {
                                 }
                             };
                             state_idx = CurContainer::Container(self.arena.register_container(&c));
+                        }
+                        State::GraphState(g) => {
+                            let cid = index.as_node()?.associated_meta_container();
+                            if !g.contains_child(&cid) {
+                                return None;
+                            }
+                            state_idx =
+                                CurContainer::Container(self.arena.register_container(&cid));
                         }
                         State::RichtextState(_) => return None,
                         State::TreeState(_) => {
@@ -2333,6 +2445,13 @@ impl DocState {
                     .nth(*index.as_seq()?)
                     .map(|c| c.to_string().into())?
             }
+            State::GraphState(g) => {
+                let cid = index.as_node()?.associated_meta_container();
+                if !g.contains_child(&cid) {
+                    return None;
+                }
+                cid.into()
+            }
             State::TreeState(_) => {
                 let id = index.as_node()?;
                 let cid = id.associated_meta_container();
@@ -2360,6 +2479,7 @@ fn create_state_(idx: ContainerIdx, config: &Configure, peer: u64) -> State {
             idx,
             config.text_style_config.clone(),
         ))),
+        ContainerType::Graph => State::GraphState(Box::new(graph_state::GraphState::new(idx))),
         ContainerType::Tree => State::TreeState(Box::new(TreeState::new(idx, peer))),
         ContainerType::MovableList => State::MovableListState(Box::new(MovableListState::new(idx))),
         #[cfg(feature = "counter")]
@@ -2374,6 +2494,7 @@ fn trigger_on_new_container(
     state_diff: &Diff,
     mut listener: impl FnMut(ContainerIdx),
     arena: &SharedArena,
+    for_edit: bool,
 ) {
     match state_diff {
         Diff::List(list) => {
@@ -2414,6 +2535,27 @@ fn trigger_on_new_container(
                 }
             }
         }
+        Diff::Graph(graph) if for_edit => {
+            // Only creation needs a full metadata copy for fresh/remapped IDs.
+            // Lifecycle edits retain the existing associated Map. Replaying
+            // unchanged historical properties here would overwrite remote edits.
+            for meta in graph
+                .ops
+                .iter()
+                .filter(|change| change.forward)
+                .filter_map(|change| change.op.created_meta())
+            {
+                listener(arena.register_container(&meta));
+            }
+        }
+        Diff::Graph(graph) => {
+            for node in graph.nodes.values().flatten().filter(|node| node.visible) {
+                listener(arena.register_container(&node.id.associated_meta_container()));
+            }
+            for edge in graph.edges.values().flatten().filter(|edge| edge.visible) {
+                listener(arena.register_container(&edge.id.associated_meta_container()));
+            }
+        }
         _ => {}
     };
 }
@@ -2421,6 +2563,7 @@ fn trigger_on_new_container(
 #[derive(Default, Clone)]
 struct EventRecorder {
     recording_diff: bool,
+    for_edit: bool,
     // A batch of diffs will be converted to a event when
     // they cannot be merged with the next diff.
     diffs: Vec<InternalDocDiff<'static>>,

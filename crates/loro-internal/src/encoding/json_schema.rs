@@ -460,6 +460,7 @@ pub(crate) fn encode_change(
                 _ => unreachable!(),
             },
 
+            ContainerType::Graph => JsonOpContent::Graph((**content.as_graph().unwrap()).clone()),
             ContainerType::Tree => match content {
                 InnerContent::Tree(op) => JsonOpContent::Tree(match &**op {
                     TreeOp::Create {
@@ -718,6 +719,7 @@ fn validate_json_op_created_container_ids(
                 }
             }
         }
+        InnerContent::Graph(graph) => graph.validate(ID::new(peer, op.counter))?,
         InnerContent::Tree(tree) => {
             if let TreeOp::Create { target, .. } = tree.as_ref() {
                 validate_json_tree_create_target(target, ID::new(peer, op.counter))?;
@@ -954,6 +956,10 @@ fn decode_op(op: json::JsonOp, arena: &SharedArena, peers: &Option<Vec<PeerID>>)
                 ))
             }
         },
+        ContainerType::Graph => match content {
+            JsonOpContent::Graph(op) => InnerContent::Graph(Arc::new(op)),
+            _ => return Err(LoroError::DecodeDataCorruptionError),
+        },
         ContainerType::Tree => match content {
             JsonOpContent::Tree(tree) => match tree {
                 json::TreeOp::Create {
@@ -1150,6 +1156,7 @@ pub mod json {
         Tree(TreeOp),
         // #[serde(with = "self::serde_impl::future_op")]
         Future(FutureOpWrapper),
+        Graph(crate::container::graph::GraphOp),
     }
 
     impl JsonOpContent {
@@ -1160,6 +1167,7 @@ pub mod json {
                 JsonOpContent::Map(..) => 1,
                 JsonOpContent::Text(text_op) => text_op.op_len(),
                 JsonOpContent::Tree(..) => 1,
+                JsonOpContent::Graph(..) => 1,
                 JsonOpContent::Future(..) => 1,
             }
         }
@@ -1416,6 +1424,9 @@ pub mod json {
                     .map_err(E::custom),
                 ContainerType::Text => serde_json::from_value(value)
                     .map(super::JsonOpContent::Text)
+                    .map_err(E::custom),
+                ContainerType::Graph => serde_json::from_value(value)
+                    .map(super::JsonOpContent::Graph)
                     .map_err(E::custom),
                 ContainerType::Tree => serde_json::from_value(value)
                     .map(super::JsonOpContent::Tree)
@@ -1859,6 +1870,7 @@ pub mod json {
                     }
                 }
             }
+            JsonOpContent::Graph(..) => {}
             JsonOpContent::Tree(..) => {
                 // Creation of child container won't be changed
             }

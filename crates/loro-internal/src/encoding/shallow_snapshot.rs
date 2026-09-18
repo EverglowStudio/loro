@@ -174,6 +174,7 @@ fn rich_op_content_bytes(oplog: &crate::OpLog, op: &crate::op::RichOp, remaining
                 _ => 0,
             },
             // Fractional indexes are variable-length and copied by the encoder.
+            crate::op::InnerContent::Graph(op) => op.encoded().len(),
             crate::op::InnerContent::Tree(tree_op) => match tree_op.as_ref() {
                 crate::container::tree::tree_op::TreeOp::Create { position, .. }
                 | crate::container::tree::tree_op::TreeOp::Move { position, .. } => {

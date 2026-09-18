@@ -3,6 +3,8 @@ pub(crate) mod fast_snapshot;
 pub(crate) mod json_schema;
 mod outdated_encode_reordered;
 mod shallow_snapshot;
+#[cfg(test)]
+pub(crate) use outdated_encode_reordered::import_changes_to_oplog as import_changes_unchecked_for_test;
 pub(crate) mod value;
 pub(crate) mod value_register;
 pub(crate) use outdated_encode_reordered::{
@@ -235,7 +237,7 @@ pub(crate) fn decode_oplog(
     parsed: ParsedHeaderAndBody,
 ) -> Result<ImportStatus, LoroError> {
     let changes = decode_oplog_changes(oplog, parsed)?;
-    let result = apply_decoded_changes_to_oplog(oplog, changes);
+    let result = apply_decoded_changes_to_oplog(oplog, changes)?;
     if result.has_deps_before_shallow_root {
         return Err(LoroError::ImportUpdatesThatDependsOnOutdatedVersion);
     }
@@ -266,7 +268,17 @@ pub(crate) struct ApplyDecodedChangesResult {
 pub(crate) fn apply_decoded_changes_to_oplog(
     oplog: &mut OpLog,
     changes: Vec<Change>,
-) -> ApplyDecodedChangesResult {
+) -> LoroResult<ApplyDecodedChangesResult> {
+    let needs_graph_validation = changes.iter().any(|c| {
+        c.ops
+            .iter()
+            .any(|op| op.container.get_type() == loro_common::ContainerType::Graph)
+    }) || (oplog.preflight_import_changes(&changes).applies_to_dag
+        && oplog.pending_changes.has_graph_ops());
+    let owns_graph_rollback = needs_graph_validation && !oplog.has_import_rollback();
+    if owns_graph_rollback {
+        oplog.begin_import_rollback();
+    }
     let ImportChangesResult {
         mut imported,
         latest_ids,
@@ -281,13 +293,29 @@ pub(crate) fn apply_decoded_changes_to_oplog(
     // remain in the returned pending range.
     let pending =
         oplog.import_unknown_lamport_pending_changes(pending_changes, Some(&mut imported));
-    ApplyDecodedChangesResult {
+    if needs_graph_validation {
+        if let Err(e) = oplog.validate_graph_import(&imported) {
+            if oplog.batch_importing && !owns_graph_rollback {
+                // The batch may continue importing after this error. Keep its
+                // journal intact and require its owner to reject final checkout,
+                // even if state validation alone would accept these references.
+                oplog.mark_import_validation_failed();
+            } else {
+                oplog.rollback_import();
+            }
+            return Err(e);
+        }
+    }
+    if owns_graph_rollback {
+        oplog.commit_import_rollback();
+    }
+    Ok(ApplyDecodedChangesResult {
         status: ImportStatus {
             success: imported,
             pending: (!pending.is_empty()).then_some(pending),
         },
         has_deps_before_shallow_root: !changes_that_have_deps_before_shallow_root.is_empty(),
-    }
+    })
 }
 
 pub(crate) struct ParsedHeaderAndBody<'a> {

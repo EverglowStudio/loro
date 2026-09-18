@@ -30,6 +30,33 @@ If an agent asks "how does Loro encoding work?", start here:
   [docs/encoding-lz4.md](../docs/encoding-lz4.md), and
   [docs/encoding-xxhash32.md](../docs/encoding-xxhash32.md): normative current
   binary-format references, pinned to a verified code commit.
+- [docs/encoding-graph.md](../docs/encoding-graph.md): native Graph tag `6`,
+  operation and state payloads, lossless JSON IDs, validation and reader
+  rejection. [loro-graph.md](loro-graph.md) maps its API and state implementation.
+
+## Native Graph Extension
+
+Verified against code 2026-09-19. Graph has raw and historical container tag
+`6`; neither mapping renumbers existing types. The current operation writer
+uses `prop = 0`, `len = 1` and outer value kind `11` (LoroValue), containing
+nested kind `6` (Binary) and a postcard `GraphOp`. The payload's IDs contain
+full peer IDs, not change-block peer indexes. JSON Graph content also keeps
+full decimal `counter@peer` strings even when the surrounding schema uses
+peer compression.
+
+`state/graph_state.rs` serializes full `Records`, including deleted objects
+and Restore/Delete identities; adjacency and visibility are rebuilt. Metadata
+is stored in separate Maps derived from object creation IDs, and the Graph
+branch of `DocState::get_alive_children_of` retains those Maps for deleted
+records during shallow export. `container/graph.rs::validate_graph_import`
+checks references against operation identity, graph scope and DAG causality;
+snapshot record validation is a separate path. See the extension for exact
+field order, integer encodings and validation boundaries.
+
+An empty applied DAG can still have pending Graph operations. Such a document
+must merge a snapshot as changes so its history unlocks the pending queue.
+`OpLog::is_empty` includes `PendingChanges::is_empty`; do not replace this
+snapshot eligibility condition with a version-vector or DAG-only check.
 
 ## Binary Envelope
 

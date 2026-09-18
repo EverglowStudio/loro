@@ -684,6 +684,16 @@ impl ContainerWrapper {
                     b.len() - rest.len() + value_offset,
                 )
             }
+            ContainerType::Graph => {
+                let mut state = crate::state::graph_state::GraphState::decode_snapshot_fast(
+                    idx,
+                    (LoroValue::Null, b),
+                    ctx,
+                )?;
+                let value = state.get_value();
+                decoded_state = Some(State::GraphState(Box::new(state)));
+                (LazyDecodedValue::Value(value), value_offset)
+            }
             ContainerType::Tree => {
                 let mut state = TreeState::decode_snapshot_fast(idx, (LoroValue::Null, b), ctx)?;
                 let value = state.get_value();
@@ -745,6 +755,9 @@ impl ContainerWrapper {
             ContainerType::MovableList => {
                 MovableListState::decode_snapshot_fast(idx, (v, b), ctx)?.into()
             }
+            ContainerType::Graph => State::GraphState(Box::new(
+                crate::state::graph_state::GraphState::decode_snapshot_fast(idx, (v, b), ctx)?,
+            )),
             ContainerType::Tree => TreeState::decode_snapshot_fast(idx, (v, b), ctx)?.into(),
             #[cfg(feature = "counter")]
             ContainerType::Counter => CounterState::decode_snapshot_fast(idx, (v, b), ctx)?.into(),
@@ -774,6 +787,10 @@ impl ContainerWrapper {
                 ContainerType::Map | ContainerType::List | ContainerType::MovableList => {
                     value.is_empty_collection()
                 }
+                ContainerType::Graph => value.as_map().is_some_and(|m| {
+                    m.values()
+                        .all(|v| v.as_list().is_some_and(|v| v.is_empty()))
+                }),
                 ContainerType::Tree => value.as_list().is_some_and(|value| value.is_empty()),
                 #[cfg(feature = "counter")]
                 ContainerType::Counter => value.as_double().is_some_and(|value| *value == 0.0),

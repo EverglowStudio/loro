@@ -20,6 +20,8 @@ Loro is a Rust CRDT workspace with JS/WASM packaging and a MoonBit codec.
 
 - Encoding/import/export modes, current vs outdated formats, shallow snapshots:
   [context/internal-encoding.md](context/internal-encoding.md).
+- Native Graph API, lifecycle, metadata, history and encoding:
+  [context/loro-graph.md](context/loro-graph.md).
 - Mergeable container model, marker/cid rules, tests, and common pitfalls:
   [context/mergeable-containers.md](context/mergeable-containers.md).
 - `import_batch` force-detach, batch-wide rollback scope, and the never-exit-detached

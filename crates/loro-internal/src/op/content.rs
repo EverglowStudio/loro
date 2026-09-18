@@ -21,6 +21,7 @@ pub enum InnerContent {
     List(InnerListOp),
     Map(MapSet),
     Tree(Arc<TreeOp>),
+    Graph(Arc<crate::container::graph::GraphOp>),
     // The future content should not use any encoded arena context.
     Future(FutureInnerContent),
 }
@@ -59,6 +60,11 @@ impl InnerContent {
                     f(&id);
                 }
             }
+            InnerContent::Graph(op) => {
+                if let Some(id) = op.created_meta() {
+                    f(&id);
+                }
+            }
             crate::op::InnerContent::Future(f) => match &f {
                 #[cfg(feature = "counter")]
                 crate::op::FutureInnerContent::Counter(_) => {}
@@ -74,6 +80,7 @@ impl InnerContent {
             InnerContent::List(l) => l.estimate_storage_size(kind),
             InnerContent::Map(_) => 3,
             InnerContent::Tree(_) => 8,
+            InnerContent::Graph(op) => op.encoded().len(),
             InnerContent::Future(f) => f.estimate_storage_size(),
         }
     }
@@ -111,6 +118,7 @@ pub enum RawOpContent<'a> {
         prop: i32,
         value: OwnedValue,
     },
+    Graph(Arc<crate::container::graph::GraphOp>),
 }
 
 impl Clone for RawOpContent<'_> {
@@ -119,6 +127,7 @@ impl Clone for RawOpContent<'_> {
             Self::Map(arg0) => Self::Map(arg0.clone()),
             Self::List(arg0) => Self::List(arg0.clone()),
             Self::Tree(arg0) => Self::Tree(arg0.clone()),
+            Self::Graph(op) => Self::Graph(op.clone()),
             #[cfg(feature = "counter")]
             Self::Counter(x) => Self::Counter(*x),
             Self::Unknown { prop, value } => Self::Unknown {
@@ -168,6 +177,7 @@ impl RawOpContent<'_> {
                 }),
             },
             Self::Tree(arg0) => RawOpContent::Tree(arg0.clone()),
+            Self::Graph(op) => RawOpContent::Graph(op.clone()),
             #[cfg(feature = "counter")]
             Self::Counter(x) => RawOpContent::Counter(*x),
             Self::Unknown { prop, value } => RawOpContent::Unknown {
@@ -184,6 +194,7 @@ impl HasLength for RawOpContent<'_> {
             RawOpContent::Map(x) => x.content_len(),
             RawOpContent::List(x) => x.content_len(),
             RawOpContent::Tree(x) => x.content_len(),
+            RawOpContent::Graph(_) => 1,
             #[cfg(feature = "counter")]
             RawOpContent::Counter(_) => 1,
             RawOpContent::Unknown { .. } => 1,
@@ -223,6 +234,7 @@ impl HasLength for InnerContent {
             InnerContent::List(list) => list.atom_len(),
             InnerContent::Map(_) => 1,
             InnerContent::Tree(_) => 1,
+            InnerContent::Graph(_) => 1,
             InnerContent::Future(_) => 1,
         }
     }
@@ -235,7 +247,7 @@ impl Sliceable for InnerContent {
                 assert!(from == 0 && to == 1);
                 a.clone()
             }
-            a @ InnerContent::Tree(_) => {
+            a @ InnerContent::Graph(_) | a @ InnerContent::Tree(_) => {
                 assert!(from == 0 && to == 1);
                 a.clone()
             }

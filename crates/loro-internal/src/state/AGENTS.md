@@ -26,6 +26,9 @@ before changing mergeable child behavior.
   reactivation.
 - `unknown_state.rs` and `../diff_calc/unknown.rs`: forward compatibility for
   unknown container types.
+- `graph_state.rs` and `graph_state/local_diff.rs`: native Graph lifecycle,
+  indexes and net local edits. See [Graph context](../../../../context/loro-graph.md)
+  for metadata revival versus editable diff recording.
 
 ## Mergeable Rules
 

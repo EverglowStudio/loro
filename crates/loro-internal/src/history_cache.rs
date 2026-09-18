@@ -206,9 +206,10 @@ impl ContainerHistoryCache {
             let mut store = state.store.lock();
             for (idx, c) in store.iter_all_containers_mut() {
                 match idx.get_type() {
-                    ContainerType::Text | ContainerType::List | ContainerType::Unknown(_) => {
-                        continue
-                    }
+                    ContainerType::Text
+                    | ContainerType::List
+                    | ContainerType::Graph
+                    | ContainerType::Unknown(_) => continue,
                     #[cfg(feature = "counter")]
                     ContainerType::Counter => continue,
                     ContainerType::Map => {}

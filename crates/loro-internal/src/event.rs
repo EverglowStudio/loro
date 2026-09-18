@@ -226,6 +226,7 @@ pub(crate) enum InternalDiff {
     RichtextRaw(DeltaRope<RichtextStateChunk, ()>),
     Map(MapDelta),
     Tree(TreeDelta),
+    Graph(crate::container::graph::GraphDiff),
     MovableList(MovableListInnerDelta),
     #[cfg(feature = "counter")]
     Counter(f64),
@@ -338,6 +339,7 @@ pub enum Diff {
     Text(TextDiff),
     Map(ResolvedMapDelta),
     Tree(TreeDiff),
+    Graph(crate::container::graph::GraphDiff),
     #[cfg(feature = "counter")]
     Counter(f64),
     Unknown,
@@ -356,6 +358,7 @@ impl InternalDiff {
             InternalDiff::RichtextRaw(t) => t.is_empty(),
             InternalDiff::Map(m) => m.updated.is_empty(),
             InternalDiff::Tree(t) => t.is_empty(),
+            InternalDiff::Graph(d) => d.is_empty(),
             InternalDiff::MovableList(t) => t.is_empty(),
             #[cfg(feature = "counter")]
             InternalDiff::Counter(c) => c.abs() < f64::EPSILON,
@@ -375,6 +378,9 @@ impl InternalDiff {
             }
             (InternalDiff::Map(a), InternalDiff::Map(b)) => Ok(InternalDiff::Map(a.compose(b))),
             (InternalDiff::Tree(a), InternalDiff::Tree(b)) => Ok(InternalDiff::Tree(a.compose(b))),
+            (InternalDiff::Graph(a), InternalDiff::Graph(b)) => {
+                Ok(InternalDiff::Graph(a.compose(b)))
+            }
             (a, _) => Err(a),
         }
     }
@@ -392,6 +398,9 @@ impl Diff {
             (Diff::Map(a), Diff::Map(b)) => {
                 // Move the accumulator out instead of cloning it, so composing
                 // a long run of fragments stays linear rather than O(n^2).
+                *a = std::mem::take(a).compose(b.clone());
+            }
+            (Diff::Graph(a), Diff::Graph(b)) => {
                 *a = std::mem::take(a).compose(b.clone());
             }
             (Diff::Tree(a), Diff::Tree(b)) => {
@@ -417,6 +426,7 @@ impl Diff {
             (Diff::Map(a), Diff::Map(b)) => Ok(Diff::Map(a.compose(b))),
 
             (Diff::Tree(a), Diff::Tree(b)) => Ok(Diff::Tree(a.compose(b))),
+            (Diff::Graph(a), Diff::Graph(b)) => Ok(Diff::Graph(a.compose(b))),
             #[cfg(feature = "counter")]
             (Diff::Counter(a), Diff::Counter(b)) => Ok(Diff::Counter(a + b)),
             (a, _) => Err(a),
@@ -444,6 +454,7 @@ impl Diff {
             Diff::Text(t) => t.is_empty(),
             Diff::Map(m) => m.updated.is_empty(),
             Diff::Tree(t) => t.diff.is_empty(),
+            Diff::Graph(d) => d.is_empty(),
             #[cfg(feature = "counter")]
             Diff::Counter(c) => c.abs() < f64::EPSILON,
             Diff::Unknown => true,
@@ -470,6 +481,7 @@ impl Diff {
             }
 
             (Diff::Tree(a), Diff::Tree(b)) => Diff::Tree(a.extend(b.diff)),
+            (Diff::Graph(a), Diff::Graph(b)) => Diff::Graph(a.compose(b)),
             #[cfg(feature = "counter")]
             (Diff::Counter(a), Diff::Counter(b)) => Diff::Counter(a + b),
             _ => unreachable!(),

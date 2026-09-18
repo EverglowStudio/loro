@@ -12,6 +12,7 @@
 pub mod arena;
 pub mod diff;
 pub mod diff_calc;
+pub mod graph;
 pub mod handler;
 pub mod sync;
 pub use state::container_tree;

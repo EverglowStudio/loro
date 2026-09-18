@@ -26,6 +26,8 @@ over graceful degradation.
   before changing mergeable containers.
 - `src/handler.rs`: typed container handlers, local operation creation, and
   `MapHandler::ensure_mergeable_*`.
+- Native Graph lifecycle, metadata events, editable diffs and helper boundaries:
+  [../../context/loro-graph.md](../../context/loro-graph.md).
 - `src/diff_calc/`: diff calculation when moving between versions.
 - `docs/diff_calc.md`: design notes for diff calculation.
 - `docs/critical-version-spec.md`: specification and proof skeleton for

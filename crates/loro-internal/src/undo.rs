@@ -145,6 +145,7 @@ fn transform_cursor(
         }
         crate::handler::Handler::Map(_) => {}
         crate::handler::Handler::Tree(_) => {}
+        crate::handler::Handler::Graph(_) => {}
         crate::handler::Handler::Unknown(_) => {}
         #[cfg(feature = "counter")]
         crate::handler::Handler::Counter(_) => {}
@@ -877,8 +878,7 @@ impl UndoManager {
                 ) {
                     Ok(c) => c,
                     Err(e) => {
-                        get_stack(&mut self.inner.lock().borrow_mut())
-                            .push(span.span, span.meta);
+                        get_stack(&mut self.inner.lock().borrow_mut()).push(span.span, span.meta);
                         return Err(e);
                     }
                 };

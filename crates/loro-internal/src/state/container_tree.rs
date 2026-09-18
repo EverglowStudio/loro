@@ -176,6 +176,14 @@ impl DocState {
                 }
                 s.emit(Event::End)?;
             }
+            (LoroValue::Map(tables), ContainerType::Graph) => {
+                s.emit(Event::Object(tables.len()))?;
+                for (name, rows) in tables.iter() {
+                    s.emit(Event::Key(name))?;
+                    self.read_tree_nodes(s, rows, rich, depth + 1)?;
+                }
+                s.emit(Event::End)?;
+            }
             (_, ContainerType::Tree) => self.read_tree_nodes(s, &v, rich, depth + 1)?,
             _ => raw(s, &v, depth + 1)?,
         };

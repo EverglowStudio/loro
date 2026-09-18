@@ -4,6 +4,7 @@ use std::{num::NonZeroU16, sync::Arc};
 mod counter;
 #[cfg(feature = "counter")]
 pub(crate) use counter::CounterDiffCalculator;
+mod graph;
 pub(super) mod tree;
 mod unknown;
 use either::Either;
@@ -450,6 +451,10 @@ impl DiffCalculator {
                     depth,
                     ContainerDiffCalculator::List(ListDiffCalculator::default()),
                 ),
+                crate::ContainerType::Graph => (
+                    depth,
+                    ContainerDiffCalculator::Graph(graph::GraphDiffCalculator::new()),
+                ),
                 crate::ContainerType::Tree => (
                     depth,
                     ContainerDiffCalculator::Tree(TreeDiffCalculator::new(idx)),
@@ -520,6 +525,7 @@ pub(crate) enum ContainerDiffCalculator {
     List(ListDiffCalculator),
     Richtext(RichtextDiffCalculator),
     Tree(TreeDiffCalculator),
+    Graph(graph::GraphDiffCalculator),
     MovableList(MovableListDiffCalculator),
     #[cfg(feature = "counter")]
     Counter(counter::CounterDiffCalculator),
@@ -535,7 +541,7 @@ impl ContainerDiffCalculator {
     /// so a shared op can never change the diff: it only makes the calculator
     /// look up a key that must resolve to the same value on both sides.
     fn ignores_ops_shared_by_both_versions(&self) -> bool {
-        matches!(self, Self::Map(_))
+        matches!(self, Self::Map(_) | Self::Graph(_))
     }
 
     fn mark_source_not_in_op_context(&mut self) {

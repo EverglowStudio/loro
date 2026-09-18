@@ -323,6 +323,127 @@ fn malformed_binary_update(peer: u64) -> Vec<u8> {
     carrier.export(ExportMode::all_updates()).unwrap()
 }
 
+/// The endpoint exists at the receiver, but the writer did not observe its creation.
+/// State membership alone accepts this edge; the operation DAG must reject it.
+fn causally_invalid_graph_update(peer: u64, unobserved: loro_common::GraphNodeId) -> Vec<u8> {
+    use crate::container::graph::GraphOp;
+
+    let source = LoroDoc::new_auto_commit();
+    source.set_peer_id(peer).unwrap();
+    let graph = source.get_graph("graph");
+    let node = graph.create_node().unwrap();
+    graph.create_edge(node, node).unwrap();
+    source.commit_then_renew();
+    let mut schema = source.export_json_updates(&Default::default(), &source.oplog_vv(), false);
+    let mut changed = false;
+    for change in &mut schema.changes {
+        for op in &mut change.ops {
+            if let JsonOpContent::Graph(GraphOp::CreateEdge { source, .. }) = &mut op.content {
+                *source = unobserved;
+                changed = true;
+            }
+        }
+    }
+    assert!(changed);
+
+    // Deliberately bypass import validation only while constructing the malformed
+    // fixture. The test imports ordinary, checksummed binary updates through the API.
+    let carrier = LoroDoc::new();
+    carrier.detach();
+    {
+        let mut oplog = carrier.oplog().lock();
+        let changes =
+            crate::encoding::json_schema::decode_json_changes(schema, &oplog.arena).unwrap();
+        // Load committed remote history; import_local_change requires an active
+        // transaction's pending DAG node and cannot construct this fixture.
+        let imported = crate::encoding::import_changes_unchecked_for_test(changes, &mut oplog);
+        assert!(imported.pending_changes.is_empty());
+        assert!(imported
+            .changes_that_have_deps_before_shallow_root
+            .is_empty());
+        assert_eq!(oplog.vv(), &source.oplog_vv());
+    }
+    carrier.export(ExportMode::all_updates()).unwrap()
+}
+
+#[test]
+fn batch_graph_validation_failure_preserves_outer_rollback_and_pending() {
+    for updates_only in [false, true] {
+        for trailing_state_error in [false, true] {
+            let (dst, chain, expected) = doc_with_snapshot_and_pending_updates();
+            let node = dst.get_graph("graph").create_node().unwrap();
+            dst.commit_then_renew();
+            dst.import(&chain[0]).unwrap();
+            assert_eq!(pending_len(&dst), 1);
+            let pending_before = dst.oplog().lock().pending_changes.version_range();
+            let vv_before = dst.oplog_vv();
+            let frontiers_before = dst.oplog_frontiers();
+            let state_frontiers_before = dst.state_frontiers();
+            let value_before = dst.get_deep_value();
+
+            let mut blobs = vec![causally_invalid_graph_update(41, node)];
+            // These updates park and unlock batch-local entries, and unlock the
+            // pre-batch entry. All of that must remain in the outer journal.
+            blobs.extend(chain.iter().skip(1).cloned());
+            if trailing_state_error {
+                blobs.push(malformed_binary_update(42));
+            }
+            let error = import_test_batch(&dst, &blobs, updates_only).unwrap_err();
+            assert!(error.to_string().contains("Graph"), "{error:?}");
+            assert!(!dst.is_detached());
+            assert_doc_unchanged(&dst, &vv_before, &frontiers_before, &value_before);
+            assert_eq!(dst.state_frontiers(), state_frontiers_before);
+            assert_eq!(pending_len(&dst), 1);
+            {
+                let oplog = dst.oplog().lock();
+                assert_eq!(oplog.pending_changes.version_range(), pending_before);
+                assert!(!oplog.batch_importing);
+                assert!(!oplog.has_import_rollback());
+            }
+
+            // The preserved pending entry must still unlock on a valid retry.
+            import_test_batch(&dst, &chain, updates_only).unwrap();
+            assert_eq!(pending_len(&dst), 0);
+            assert_eq!(dst.oplog_vv().get(&2), expected.oplog_vv().get(&2));
+            assert_eq!(dst.get_graph("graph").nodes(), vec![node]);
+            assert_eq!(dst.get_graph("graph").edge_count(), 0);
+            dst.get_map("map")
+                .insert("after_graph_rejection", true)
+                .unwrap();
+            dst.commit_then_renew();
+            assert_eq!(dst.state_frontiers(), dst.oplog_frontiers());
+            let copy = LoroDoc::new();
+            copy.import(&dst.export(ExportMode::Snapshot).unwrap())
+                .unwrap();
+            assert_eq!(copy.get_deep_value(), dst.get_deep_value());
+        }
+    }
+}
+
+#[test]
+fn detached_graph_batch_rejection_rolls_back_its_own_scope() {
+    let dst = LoroDoc::new_auto_commit();
+    dst.set_peer_id(3).unwrap();
+    let node = dst.get_graph("graph").create_node().unwrap();
+    dst.commit_then_renew();
+    dst.detach();
+    let vv_before = dst.oplog_vv();
+    let frontiers_before = dst.oplog_frontiers();
+    let value_before = dst.get_deep_value();
+    let bad = causally_invalid_graph_update(41, node);
+    assert!(dst.import_updates_batch(&[&bad]).is_err());
+    assert!(dst.is_detached());
+    assert_doc_unchanged(&dst, &vv_before, &frontiers_before, &value_before);
+    assert_eq!(dst.state_frontiers(), frontiers_before);
+    assert_eq!(pending_len(&dst), 0);
+    assert!(!dst.oplog().lock().has_import_rollback());
+    assert!(!dst.oplog().lock().batch_importing);
+    dst.checkout_to_latest();
+    dst.get_graph("graph").create_node().unwrap();
+    dst.commit_then_renew();
+    assert_eq!(dst.state_frontiers(), dst.oplog_frontiers());
+}
+
 fn doc_with_snapshot_and_pending_updates() -> (LoroDoc, Vec<Vec<u8>>, LoroDoc) {
     let base = LoroDoc::new_auto_commit();
     base.set_peer_id(1).unwrap();
@@ -653,6 +774,134 @@ fn corrupt_snapshot_import_rolls_back_empty_doc() {
 
     dst.import(&snapshot).unwrap();
     assert_eq!(dst.get_deep_value(), src.get_deep_value());
+}
+
+/// Replace only a Graph wrapper while preserving valid SSTable and document checksums.
+fn snapshot_with_invalid_graph_wrapper(
+    snapshot: &[u8],
+    graph: &loro_common::ContainerID,
+    section_index: usize,
+    wrong_kind: bool,
+) -> Vec<u8> {
+    use crate::utils::kv_wrapper::KvWrapper;
+    use bytes::Bytes;
+    use loro_common::{ContainerID, ContainerType};
+
+    let mut remaining = &snapshot[22..];
+    let mut sections = Vec::new();
+    for _ in 0..3 {
+        let length = u32::from_le_bytes(remaining[..4].try_into().unwrap()) as usize;
+        sections.push(Bytes::copy_from_slice(&remaining[4..4 + length]));
+        remaining = &remaining[4 + length..];
+    }
+    assert!(remaining.is_empty());
+    let kv = KvWrapper::new_mem();
+    if section_index == 1 && !sections[2].is_empty() {
+        // The fixture exports at its latest shallow root. A complete overlay at
+        // that same version also exercises decode_twice after a valid root decode.
+        kv.import(sections[2].clone()).unwrap();
+        kv.remove(b"fr");
+    } else {
+        kv.import(sections[section_index].clone()).unwrap();
+    }
+    let key = graph.to_bytes();
+    assert!(kv.contains_key(&key));
+    let wrapper = if wrong_kind {
+        let map_key = ContainerID::new_root("map", ContainerType::Map).to_bytes();
+        // A real, complete Map wrapper, not just a malformed Graph payload.
+        kv.get(&map_key).unwrap()
+    } else {
+        Bytes::from_static(&[6]) // Graph kind, missing depth and parent.
+    };
+    kv.insert(&key, wrapper);
+    sections[section_index] = kv.export();
+    let mut result = snapshot[..22].to_vec();
+    for bytes in sections {
+        result.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        result.extend_from_slice(&bytes);
+    }
+    refresh_snapshot_checksum(&mut result);
+    crate::encoding::parse_header_and_body(&result, true).unwrap();
+    result
+}
+
+#[test]
+fn graph_snapshot_invalid_wrappers_return_errors_and_leave_doc_usable() {
+    use crate::{handler::GraphHandler, HandlerTrait};
+
+    for nested in [false, true] {
+        let source = LoroDoc::new_auto_commit();
+        source.set_peer_id(1).unwrap();
+        source.get_map("map").insert("keep", true).unwrap();
+        let graph = if nested {
+            source
+                .get_map("map")
+                .insert_container("graph", GraphHandler::new_detached())
+                .unwrap()
+        } else {
+            source.get_graph("graph")
+        };
+        let node = graph.create_node().unwrap();
+        graph
+            .node_meta(node)
+            .unwrap()
+            .insert("title", "preserved")
+            .unwrap();
+        source.commit_then_renew();
+        let frontiers = source.state_frontiers();
+        for shallow in [false, true] {
+            let snapshot = source
+                .export(if shallow {
+                    ExportMode::shallow_snapshot(&frontiers)
+                } else {
+                    ExportMode::Snapshot
+                })
+                .unwrap();
+            for (section, wrong_kind) in [(1, false), (1, true), (2, false), (2, true)] {
+                if section == 2 && !shallow {
+                    continue;
+                }
+                let corrupted = snapshot_with_invalid_graph_wrapper(
+                    &snapshot,
+                    &graph.id(),
+                    section,
+                    wrong_kind,
+                );
+                let target = LoroDoc::new_auto_commit();
+                target.set_peer_id(99).unwrap();
+                let vv_before = target.oplog_vv();
+                let frontiers_before = target.state_frontiers();
+                let value_before = target.get_deep_value();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    target.import(&corrupted)
+                }));
+                let error = result
+                    .expect("invalid Graph wrappers must return Err, not panic")
+                    .expect_err("invalid Graph wrapper was accepted");
+                assert!(matches!(
+                    error,
+                    LoroError::DecodeError(_) | LoroError::DecodeDataCorruptionError
+                ));
+                assert_doc_unchanged(&target, &vv_before, &frontiers_before, &value_before);
+                assert_eq!(target.state_frontiers(), frontiers_before);
+                assert!(!target.is_detached());
+                assert_eq!(pending_len(&target), 0);
+                assert!(target.oplog().lock().is_empty());
+                assert!(!target.oplog().lock().has_import_rollback());
+
+                target.import(&snapshot).unwrap();
+                assert_eq!(target.get_deep_value(), source.get_deep_value());
+                target.get_graph(graph.id()).create_node().unwrap();
+                target
+                    .get_map("map")
+                    .insert("after_rejection", true)
+                    .unwrap();
+                target.commit_then_renew();
+                assert_eq!(target.state_frontiers(), target.oplog_frontiers());
+                assert_eq!(target.get_graph(graph.id()).node_count(), 2);
+            }
+        }
+    }
 }
 
 #[test]

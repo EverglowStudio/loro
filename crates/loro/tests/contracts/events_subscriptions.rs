@@ -14,6 +14,7 @@ enum CapturedDiffKind {
     Map,
     Text,
     Tree,
+    Graph,
     List { has_move: bool },
     Counter,
     Unknown,
@@ -49,6 +50,7 @@ fn capture_event(event: loro::event::DiffEvent<'_>) -> CapturedEvent {
                     Diff::Map(_) => CapturedDiffKind::Map,
                     Diff::Text(_) => CapturedDiffKind::Text,
                     Diff::Tree(_) => CapturedDiffKind::Tree,
+                    Diff::Graph(_) => CapturedDiffKind::Graph,
                     Diff::Counter(_) => CapturedDiffKind::Counter,
                     Diff::List(items) => CapturedDiffKind::List {
                         has_move: items

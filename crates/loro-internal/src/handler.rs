@@ -30,8 +30,10 @@ use tracing::{error, instrument};
 
 pub use crate::diff::diff_impl::UpdateOptions;
 pub use tree::TreeHandler;
+pub mod graph;
 mod movable_list_apply_delta;
 mod tree;
+pub use graph::{GraphDiff, GraphEdge, GraphHandler, GraphNode};
 
 const REGULAR_CONTAINER_VALUE_ARG_ERROR: &str =
     "Cannot use a LoroValue::Container as a regular value. To create a child container, use insert_container/set_container, or ensure_mergeable_* on maps for mergeable children";
@@ -283,6 +285,9 @@ impl BasicHandler {
                     inner: handler.into(),
                 }),
                 ContainerType::Tree => Handler::Tree(TreeHandler {
+                    inner: handler.into(),
+                }),
+                ContainerType::Graph => Handler::Graph(GraphHandler {
                     inner: handler.into(),
                 }),
                 ContainerType::Text => Handler::Text(TextHandler {
@@ -973,6 +978,7 @@ pub enum Handler {
     List(ListHandler),
     MovableList(MovableListHandler),
     Tree(TreeHandler),
+    Graph(GraphHandler),
     #[cfg(feature = "counter")]
     Counter(counter::CounterHandler),
     Unknown(UnknownHandler),
@@ -985,6 +991,7 @@ impl HandlerTrait for Handler {
             Self::Map(x) => x.is_attached(),
             Self::List(x) => x.is_attached(),
             Self::Tree(x) => x.is_attached(),
+            Self::Graph(x) => x.is_attached(),
             Self::MovableList(x) => x.is_attached(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.is_attached(),
@@ -999,6 +1006,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.attached_handler(),
             Self::MovableList(x) => x.attached_handler(),
             Self::Tree(x) => x.attached_handler(),
+            Self::Graph(x) => x.attached_handler(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.attached_handler(),
             Self::Unknown(x) => x.attached_handler(),
@@ -1012,6 +1020,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.get_value(),
             Self::MovableList(x) => x.get_value(),
             Self::Tree(x) => x.get_value(),
+            Self::Graph(x) => x.get_value(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.get_value(),
             Self::Unknown(x) => x.get_value(),
@@ -1025,6 +1034,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.get_deep_value(),
             Self::MovableList(x) => x.get_deep_value(),
             Self::Tree(x) => x.get_deep_value(),
+            Self::Graph(x) => x.get_deep_value(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.get_deep_value(),
             Self::Unknown(x) => x.get_deep_value(),
@@ -1038,6 +1048,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.kind(),
             Self::MovableList(x) => x.kind(),
             Self::Tree(x) => x.kind(),
+            Self::Graph(x) => x.kind(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.kind(),
             Self::Unknown(x) => x.kind(),
@@ -1051,6 +1062,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.to_handler(),
             Self::MovableList(x) => x.to_handler(),
             Self::Tree(x) => x.to_handler(),
+            Self::Graph(x) => x.to_handler(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.to_handler(),
             Self::Unknown(x) => x.to_handler(),
@@ -1069,6 +1081,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => Ok(Handler::List(x.attach(txn, parent, self_id)?)),
             Self::MovableList(x) => Ok(Handler::MovableList(x.attach(txn, parent, self_id)?)),
             Self::Tree(x) => Ok(Handler::Tree(x.attach(txn, parent, self_id)?)),
+            Self::Graph(x) => Ok(Handler::Graph(x.attach(txn, parent, self_id)?)),
             #[cfg(feature = "counter")]
             Self::Counter(x) => Ok(Handler::Counter(x.attach(txn, parent, self_id)?)),
             Self::Unknown(x) => Ok(Handler::Unknown(x.attach(txn, parent, self_id)?)),
@@ -1082,6 +1095,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.get_attached().map(Handler::List),
             Self::MovableList(x) => x.get_attached().map(Handler::MovableList),
             Self::Tree(x) => x.get_attached().map(Handler::Tree),
+            Self::Graph(x) => x.get_attached().map(Handler::Graph),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.get_attached().map(Handler::Counter),
             Self::Unknown(x) => x.get_attached().map(Handler::Unknown),
@@ -1099,6 +1113,7 @@ impl HandlerTrait for Handler {
             Self::List(x) => x.doc(),
             Self::MovableList(x) => x.doc(),
             Self::Tree(x) => x.doc(),
+            Self::Graph(x) => x.doc(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.doc(),
             Self::Unknown(x) => x.doc(),
@@ -1147,6 +1162,9 @@ impl Handler {
             ContainerType::Tree => Self::Tree(TreeHandler {
                 inner: handler.into(),
             }),
+            ContainerType::Graph => Self::Graph(GraphHandler {
+                inner: handler.into(),
+            }),
             ContainerType::Text => Self::Text(TextHandler {
                 inner: handler.into(),
             }),
@@ -1168,6 +1186,7 @@ impl Handler {
             ContainerType::Map => Self::Map(MapHandler::new_detached()),
             ContainerType::List => Self::List(ListHandler::new_detached()),
             ContainerType::Tree => Self::Tree(TreeHandler::new_detached()),
+            ContainerType::Graph => Self::Graph(GraphHandler::new_detached()),
             ContainerType::MovableList => Self::MovableList(MovableListHandler::new_detached()),
             #[cfg(feature = "counter")]
             ContainerType::Counter => Self::Counter(counter::CounterHandler::new_detached()),
@@ -1181,6 +1200,7 @@ impl Handler {
             Self::List(x) => x.id(),
             Self::Text(x) => x.id(),
             Self::Tree(x) => x.id(),
+            Self::Graph(x) => x.id(),
             Self::MovableList(x) => x.id(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.id(),
@@ -1194,6 +1214,7 @@ impl Handler {
             Self::List(x) => x.idx(),
             Self::Text(x) => x.idx(),
             Self::Tree(x) => x.idx(),
+            Self::Graph(x) => x.idx(),
             Self::MovableList(x) => x.idx(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.idx(),
@@ -1207,6 +1228,7 @@ impl Handler {
             Self::List(_) => ContainerType::List,
             Self::Text(_) => ContainerType::Text,
             Self::Tree(_) => ContainerType::Tree,
+            Self::Graph(_) => ContainerType::Graph,
             Self::MovableList(_) => ContainerType::MovableList,
             #[cfg(feature = "counter")]
             Self::Counter(_) => ContainerType::Counter,
@@ -1221,6 +1243,7 @@ impl Handler {
             Self::MovableList(x) => x.get_deep_value(),
             Self::Text(x) => x.get_deep_value(),
             Self::Tree(x) => x.get_deep_value(),
+            Self::Graph(x) => x.get_deep_value(),
             #[cfg(feature = "counter")]
             Self::Counter(x) => x.get_deep_value(),
             Self::Unknown(x) => x.get_deep_value(),
@@ -1308,6 +1331,12 @@ impl Handler {
                     }
                 };
                 x.apply_delta(delta, container_remap)?;
+            }
+            Self::Graph(x) => {
+                let Diff::Graph(diff) = diff else {
+                    return Err(LoroError::DecodeError("Invalid graph diff".into()));
+                };
+                x.apply_delta(diff, container_remap)?;
             }
             Self::Tree(x) => {
                 fn remap_tree_id(
@@ -1436,6 +1465,7 @@ impl Handler {
             Handler::List(list_handler) => list_handler.clear(),
             Handler::MovableList(movable_list_handler) => movable_list_handler.clear(),
             Handler::Tree(tree_handler) => tree_handler.clear(),
+            Handler::Graph(graph_handler) => graph_handler.clear(),
             #[cfg(feature = "counter")]
             Handler::Counter(counter_handler) => counter_handler.clear(),
             Handler::Unknown(_unknown_handler) => Ok(()),

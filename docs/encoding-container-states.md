@@ -8,6 +8,10 @@ and shallow snapshots. Read it with [encoding.md](./encoding.md), which defines
 the document envelope, the three snapshot sections, SSTable, postcard and
 serde_columnar notation, and shallow root/overlay behavior.
 
+The [native Graph extension](encoding-graph.md), verified on 2026-09-19,
+specifies Graph's tag `6` and full-record state codec. The base codecs below
+retain their original verification date and type assignments.
+
 The formats below are the bytes currently written by Loro. Where the current
 reader accepts a broader compatibility form, that form is called out
 separately; reader tolerance is not a canonical writer rule.
@@ -59,6 +63,7 @@ The low-seven-bit current kind mapping is:
 | Tree | 3 |
 | MovableList | 4 |
 | Counter, when enabled | 5 |
+| Graph, fork extension | 6 |
 
 Other tags decode as `Unknown(raw)`. Bit 7 is reserved as the root flag in
 this particular representation, so only the low seven bits survive the key
@@ -135,6 +140,7 @@ mapping:
 | MovableList | 3 |
 | Tree | 4 |
 | Counter, when enabled | 5 |
+| Graph, fork extension | 6 |
 
 Other bytes become `Unknown(byte)`. A build without the counter feature also
 treats historical/raw tag 5 as unknown. The public `loro` crate enables the

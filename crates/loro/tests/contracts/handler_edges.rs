@@ -51,6 +51,7 @@ fn value_kind(value: &ValueOrContainer) -> String {
             Container::Map(_) => "container:map".to_string(),
             Container::Text(_) => "container:text".to_string(),
             Container::Tree(_) => "container:tree".to_string(),
+            Container::Graph(_) => "container:graph".to_string(),
             Container::MovableList(_) => "container:movable_list".to_string(),
             #[cfg(feature = "counter")]
             Container::Counter(_) => "container:counter".to_string(),

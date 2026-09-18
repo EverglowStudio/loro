@@ -330,6 +330,9 @@ impl ApplyDiff for LoroValue {
             LoroValue::Map(map) => {
                 for item in diff.iter() {
                     match item {
+                        Diff::Graph(diff) => {
+                            apply_graph_value_diff(map, diff);
+                        }
                         Diff::Map(diff) => {
                             let map = map.make_mut();
                             for (key, value) in diff.updated.iter() {
@@ -417,6 +420,9 @@ impl ApplyDiff for LoroValue {
             LoroValue::Map(map) => {
                 for item in diff.iter() {
                     match item {
+                        Diff::Graph(diff) => {
+                            apply_graph_value_diff(map, diff);
+                        }
                         Diff::Map(diff) => {
                             let map = map.make_mut();
                             for (key, value) in diff.updated.iter() {
@@ -451,6 +457,7 @@ impl ApplyDiff for LoroValue {
             Diff::Text(_) => TypeHint::Text,
             Diff::Map(_) => TypeHint::Map,
             Diff::Tree(_) => TypeHint::Tree,
+            Diff::Graph(_) => TypeHint::Map,
             #[cfg(feature = "counter")]
             Diff::Counter(_) => TypeHint::Counter,
             Diff::Unknown => unreachable!(),
@@ -486,14 +493,29 @@ impl ApplyDiff for LoroValue {
                         let list = l.make_mut();
                         value = list.get_mut(*index).unwrap();
                     }
-                    Index::Node(tree_id) => {
-                        let l = value.as_list_mut().unwrap();
-                        let list = l.make_mut();
-                        let Some(map) = list.iter_mut().find(|x| {
-                            let id = x.as_map().unwrap().get("id").unwrap().as_string().unwrap();
-                            id.as_ref() == tree_id.to_string()
-                        }) else {
-                            // delete node first
+                    Index::Node(object_id) => {
+                        let id = object_id.to_string();
+                        let matches_id = |row: &&mut LoroValue| {
+                            row.as_map()
+                                .and_then(|map| map.get("id"))
+                                .and_then(LoroValue::as_string)
+                                .is_some_and(|value| value.as_str() == id)
+                        };
+                        // The Node index, not a map's user-defined field names,
+                        // identifies metadata on a Tree or Graph object.
+                        let row = match value {
+                            LoroValue::List(list) => list.make_mut().iter_mut().find(matches_id),
+                            LoroValue::Map(graph) => graph
+                                .make_mut()
+                                .iter_mut()
+                                .filter(|(table, _)| matches!(table.as_str(), "nodes" | "edges"))
+                                .filter_map(|(_, rows)| rows.as_list_mut())
+                                .flat_map(|rows| rows.make_mut().iter_mut())
+                                .find(matches_id),
+                            _ => unreachable!(),
+                        };
+                        let Some(map) = row else {
+                            // Hidden Graph records and deleted Tree nodes have no visible row.
                             return;
                         };
                         let map_mut = map.as_map_mut().unwrap().make_mut();
@@ -1218,5 +1240,73 @@ pub mod wasm {
 
             Ok(meta)
         }
+    }
+}
+
+fn apply_graph_value_diff(
+    map: &mut loro_common::LoroMapValue,
+    diff: &crate::container::graph::GraphDiff,
+) {
+    for table in ["nodes", "edges"] {
+        let existing = map
+            .get(table)
+            .and_then(|v| v.as_list())
+            .map(|l| l.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut rows: std::collections::BTreeMap<String, LoroValue> = existing
+            .into_iter()
+            .filter_map(|v| {
+                let id = v.as_map()?.get("id")?.as_string()?.to_string();
+                Some((id, v))
+            })
+            .collect();
+        let updates: Vec<(String, bool, Option<(String, String)>)> = if table == "nodes" {
+            diff.nodes
+                .iter()
+                .map(|(id, n)| (id.to_string(), n.as_ref().is_some_and(|n| n.visible), None))
+                .collect()
+        } else {
+            diff.edges
+                .iter()
+                .map(|(id, e)| {
+                    (
+                        id.to_string(),
+                        e.as_ref().is_some_and(|e| e.visible),
+                        e.as_ref()
+                            .map(|e| (e.source.to_string(), e.target.to_string())),
+                    )
+                })
+                .collect()
+        };
+        for (id, visible, ends) in updates {
+            if !visible {
+                rows.remove(&id);
+                continue;
+            }
+            // Graph record events are followed by a full metadata subtree. Reset
+            // the row first, including when checkout has removed metadata keys.
+            let meta = LoroValue::Map(Default::default());
+            let mut row =
+                crate::fx_map!("id".to_string()=>id.clone().into(),"meta".to_string()=>meta);
+            if let Some((source, target)) = ends {
+                row.insert("source".into(), source.into());
+                row.insert("target".into(), target.into());
+            }
+            rows.insert(id, row.into());
+        }
+        let mut rows: Vec<_> = rows.into_values().collect();
+        rows.sort_by_key(|r| {
+            loro_common::ID::try_from(
+                r.as_map()
+                    .unwrap()
+                    .get("id")
+                    .unwrap()
+                    .as_string()
+                    .unwrap()
+                    .as_str(),
+            )
+            .unwrap()
+        });
+        map.make_mut().insert(table.into(), rows.into());
     }
 }

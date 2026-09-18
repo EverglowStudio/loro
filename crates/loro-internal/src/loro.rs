@@ -529,7 +529,7 @@ impl LoroDoc {
         }
     }
 
-    /// Is the document empty? (no ops)
+    /// Can a snapshot initialize this document without replacing applied or pending ops?
     #[inline(always)]
     pub fn can_reset_with_snapshot(&self) -> bool {
         let oplog = self.oplog.lock();
@@ -781,7 +781,7 @@ impl LoroDoc {
         }
 
         if self.is_detached() {
-            let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes);
+            let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes)?;
             if result.has_deps_before_shallow_root {
                 return Err(LoroError::ImportUpdatesThatDependsOnOutdatedVersion);
             }
@@ -791,7 +791,7 @@ impl LoroDoc {
 
         if !preflight.applies_to_dag {
             let pending_root_containers = pending_root_containers_to_materialize(&oplog, &changes);
-            let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes);
+            let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes)?;
             if result.has_deps_before_shallow_root {
                 oplog.arena.rollback(arena_checkpoint);
                 return Err(LoroError::ImportUpdatesThatDependsOnOutdatedVersion);
@@ -822,7 +822,7 @@ impl LoroDoc {
             oplog.begin_import_rollback_with_arena(arena_checkpoint);
         }
 
-        let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes);
+        let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes)?;
         if &old_vv != oplog.vv() {
             let mut diff = DiffCalculator::new(false);
             // Applying may have unlocked pending changes; the isolated fast path is only valid
@@ -1132,6 +1132,18 @@ impl LoroDoc {
     }
 
     /// id can be a str, ContainerID, or ContainerIdRaw.
+    pub fn try_get_graph<I: IntoContainerId>(&self, id: I) -> Option<crate::handler::GraphHandler> {
+        let id = id.into_container_id(&self.arena, ContainerType::Graph);
+        if !self.has_container(&id) {
+            return None;
+        }
+        self.ensure_root_container(&id);
+        Handler::new_attached(id, self.clone()).into_graph().ok()
+    }
+    pub fn get_graph<I: IntoContainerId>(&self, id: I) -> crate::handler::GraphHandler {
+        self.try_get_graph(id)
+            .expect("Graph container does not exist")
+    }
     /// if it's str it will use Root container, which will not be None
     #[inline]
     pub fn try_get_tree<I: IntoContainerId>(&self, id: I) -> Option<TreeHandler> {
@@ -1230,7 +1242,7 @@ impl LoroDoc {
             },
             |from, to| {
                 self._checkout_without_emitting(from, false, false).unwrap();
-                self.state.lock().start_recording();
+                self.state.lock().start_recording_for_edit();
                 self._checkout_without_emitting(to, false, false).unwrap();
                 let mut state = self.state.lock();
                 let e = state.take_events();
@@ -1317,7 +1329,7 @@ impl LoroDoc {
         };
         let result = (|| {
             self._checkout_without_emitting(a, true, false)?;
-            self.state.lock().start_recording();
+            self.state.lock().start_recording_for_edit();
             self._checkout_without_emitting(b, true, false)?;
             let mut state = self.state.lock();
             let e = state.take_events();
@@ -2088,7 +2100,8 @@ impl LoroDoc {
                                 },
                             })
                         }
-                        crate::diff_calc::ContainerDiffCalculator::Tree(_) => unreachable!(),
+                        crate::diff_calc::ContainerDiffCalculator::Tree(_)
+                        | crate::diff_calc::ContainerDiffCalculator::Graph(_) => unreachable!(),
                         crate::diff_calc::ContainerDiffCalculator::Map(_) => unreachable!(),
                         #[cfg(feature = "counter")]
                         crate::diff_calc::ContainerDiffCalculator::Counter(_) => unreachable!(),
@@ -2141,7 +2154,10 @@ impl LoroDoc {
                                 },
                             })
                         }
-                        ContainerType::Map | ContainerType::Tree | ContainerType::Unknown(_) => {
+                        ContainerType::Map
+                        | ContainerType::Tree
+                        | ContainerType::Graph
+                        | ContainerType::Unknown(_) => {
                             unreachable!()
                         }
                         #[cfg(feature = "counter")]
@@ -2620,7 +2636,8 @@ impl BatchImportGuard<'_> {
     /// cannot be applied to `DocState` (malformed remote ops reach state validation
     /// only here, because the blobs were imported while detached), the whole batch is
     /// rolled back out of the `OpLog` so the document stays attached and unchanged,
-    /// and the state-apply error is returned.
+    /// and the state-apply error is returned. A deferred Graph causal-validation
+    /// failure rejects the batch before checkout using the same rollback scope.
     fn finish(&mut self, exclude_applied_pending: bool) -> LoroResult<VersionRange> {
         #[cfg(debug_assertions)]
         {
@@ -2630,16 +2647,17 @@ impl BatchImportGuard<'_> {
         let txn = self.txn.take().expect("finish called twice");
         let options = self.options.take();
 
-        let pending = {
+        let (pending, validation_failed) = {
             let mut oplog = doc.oplog.lock();
             oplog.batch_importing = false;
             // Read both pending entries and the applied VV under the same oplog
             // lock, while still holding txn. Never re-query after guard cleanup.
-            if exclude_applied_pending {
+            let pending = if exclude_applied_pending {
                 oplog.pending_changes.version_range_since(oplog.vv())
             } else {
                 oplog.pending_changes.version_range()
-            }
+            };
+            (pending, oplog.import_validation_failed())
         };
 
         // The txn guard must stay held across the checkout, and the renew below must
@@ -2648,12 +2666,18 @@ impl BatchImportGuard<'_> {
         // flight poisons the mutex.
         let mut checkout = Ok(());
         if self.was_attached {
-            checkout = doc._checkout_to_latest_without_commit_with_event(
-                true,
-                "checkout".into(),
-                EventTriggerKind::Checkout,
-                true,
-            );
+            checkout = if validation_failed {
+                Err(LoroError::DecodeError(
+                    "Graph operation validation failed during batch import".into(),
+                ))
+            } else {
+                doc._checkout_to_latest_without_commit_with_event(
+                    true,
+                    "checkout".into(),
+                    EventTriggerKind::Checkout,
+                    true,
+                )
+            };
             if let Err(e) = &checkout {
                 // `DocState::apply_diff` validates before mutating, so the state is
                 // still at its pre-batch version; undoing the batch in the `OpLog`

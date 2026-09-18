@@ -69,6 +69,7 @@ pub(crate) struct ImportRollback {
     arena: SharedArenaRollback,
     change_store: ChangeStoreRollback,
     pending: PendingChangesRollback,
+    validation_failed: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -228,7 +229,9 @@ impl OpLog {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.dag.is_empty() && self.arena.can_import_snapshot()
+        // Pending operations may have no arena payloads. They must still prevent
+        // direct snapshot initialization, which bypasses pending-change replay.
+        self.dag.is_empty() && self.pending_changes.is_empty() && self.arena.can_import_snapshot()
     }
 
     /// This is the **only** place to update the `OpLog.changes`
@@ -277,6 +280,7 @@ impl OpLog {
             arena,
             change_store: ChangeStoreRollback::new(old_vv),
             pending: Default::default(),
+            validation_failed: false,
         });
     }
 
@@ -288,6 +292,21 @@ impl OpLog {
     /// check this first and leave the scope to its owner.
     pub(crate) fn has_import_rollback(&self) -> bool {
         self.import_rollback.is_some()
+    }
+
+    /// Reject the current batch without consuming its owner's rollback journal.
+    /// Unlike a decode error, a semantic rejection must not reach final checkout.
+    pub(crate) fn mark_import_validation_failed(&mut self) {
+        self.import_rollback
+            .as_mut()
+            .expect("semantic rejection requires an import rollback scope")
+            .validation_failed = true;
+    }
+
+    pub(crate) fn import_validation_failed(&self) -> bool {
+        self.import_rollback
+            .as_ref()
+            .is_some_and(|rollback| rollback.validation_failed)
     }
 
     pub(crate) fn commit_import_rollback(&mut self) {
@@ -334,7 +353,7 @@ impl OpLog {
             if change.ops.iter().any(|op| {
                 matches!(
                     op.container.get_type(),
-                    ContainerType::List | ContainerType::Tree
+                    ContainerType::List | ContainerType::Tree | ContainerType::Graph
                 )
             }) {
                 ans.needs_state_apply_rollback = true;
@@ -1363,6 +1382,7 @@ pub(crate) fn local_op_to_remote(
             }))
         }
         crate::op::InnerContent::Tree(tree) => contents.push(RawOpContent::Tree(tree.clone())),
+        crate::op::InnerContent::Graph(graph) => contents.push(RawOpContent::Graph(graph.clone())),
         crate::op::InnerContent::Future(f) => match f {
             #[cfg(feature = "counter")]
             crate::op::FutureInnerContent::Counter(c) => contents.push(RawOpContent::Counter(*c)),

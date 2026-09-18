@@ -7,7 +7,7 @@ use crate::{
     version::Frontiers,
 };
 use bytes::Bytes;
-use loro_common::{ContainerID, LoroResult, LoroValue};
+use loro_common::{ContainerID, ContainerType, LoroError, LoroResult, LoroValue};
 use std::collections::VecDeque;
 
 use super::ContainerWrapper;
@@ -437,6 +437,49 @@ impl InnerStore {
         self.kv.clone()
     }
 
+    fn validate_graph_snapshots(&self) -> LoroResult<()> {
+        // Prefix ranges avoid decoding or scanning unrelated container values.
+        let mut objects = std::collections::BTreeSet::new();
+        for prefix in [6u8, 134u8] {
+            for (key, bytes) in self.kv.scan_range_entries(&[prefix], &[prefix + 1]) {
+                let cid = ContainerID::try_from_bytes(&key)?;
+                let mut wrapper = ContainerWrapper::try_new_from_bytes(bytes)?;
+                if cid.container_type() != ContainerType::Graph
+                    || wrapper.kind() != cid.container_type()
+                {
+                    return Err(LoroError::DecodeError(
+                        "Graph snapshot key and wrapper kind disagree".into(),
+                    ));
+                }
+                let idx = self.arena.register_container(&cid);
+                let ctx = ContainerCreationContext {
+                    configure: &self.config,
+                    peer: 0,
+                };
+                wrapper.decode_state(idx, ctx)?;
+                let graph = wrapper
+                    .try_get_state()
+                    .and_then(|state| state.as_graph_state())
+                    .ok_or_else(|| {
+                        LoroError::DecodeError("Invalid Graph snapshot state kind".into())
+                    })?;
+                for id in graph
+                    .all_nodes()
+                    .into_iter()
+                    .map(|n| n.id.id())
+                    .chain(graph.all_edges().into_iter().map(|e| e.id.id()))
+                {
+                    if !objects.insert(id) {
+                        return Err(loro_common::LoroError::DecodeError(
+                            "Graph objects cannot share metadata identities".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn decode(
         &mut self,
         bytes: bytes::Bytes,
@@ -450,6 +493,7 @@ impl InnerStore {
             fr = Some(Frontiers::decode(&f)?);
         }
 
+        self.validate_graph_snapshots()?;
         let kv = self.kv.arc_clone();
         self.arena
             .set_parent_resolver(Some(move |child_id: ContainerID| {
@@ -480,6 +524,7 @@ impl InnerStore {
             .import(bytes_b)
             .map_err(|e| loro_common::LoroError::DecodeError(e.into_boxed_str()))?;
         self.kv.remove(FRONTIERS_KEY);
+        self.validate_graph_snapshots()?;
         let entries = self.kv.scan_all_entries();
         let store = &mut self.store;
         let arena = &self.arena;

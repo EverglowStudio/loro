@@ -43,7 +43,8 @@ Consequences to keep in mind:
   blob that fails mid-decode inside a batch keeps its partial prefix until the batch
   ends — the same weaker guarantee the modern `Fast*` detached path already had.
 - The rollback discards the *whole* batch, including blobs that imported cleanly. That
-  only happens on the closing-checkout failure, where the alternative is an unusable doc.
+  happens on closing-checkout failure or a deferred Graph semantic rejection,
+  where keeping the history would violate the document's invariants.
 - After `rollback_import` the shared `self.diff_calculator` still caches ranges against
   the rolled-back history, so `finish` replaces it with a fresh `DiffCalculator::new(true)`.
 - `PendingChangesRollback` (`src/oplog/pending_changes.rs`) records **what each touched
@@ -60,6 +61,21 @@ Consequences to keep in mind:
   peers waiting on the same missing dep share one slot, so a batch can append to a slot
   that already held a pre-batch change — `PendingSlot::Truncate` is what trims off only
   the batch's own entries.
+
+Graph semantic validation (verified against code 2026-09-19) runs after operations
+enter the DAG, including newly unlocked pending operations. Inside an attached
+batch, `apply_decoded_changes_to_oplog` marks the existing `ImportRollback` as
+`validation_failed` and returns the Graph error without consuming the journal.
+The loop can still process later blobs. `BatchImportGuard::finish` rejects that
+marked scope before checkout and rolls everything back; otherwise it retains the
+ordinary final state-validation rollback. State membership checks alone cannot
+replace this marker: an endpoint can exist at the receiver without being a
+causal ancestor of the incoming edge operation.
+
+Outside an outer batch scope, the Graph rejection rolls its import scope back
+immediately. This includes a batch that started explicitly detached: it has no
+outer reattach scope, so the Graph importer owns its own scope. None of this
+changes ordinary checksum/body decode-error behavior into all-or-nothing import.
 
 ## Why `catch_unwind`, not `Drop`
 
@@ -104,7 +120,9 @@ regression on out-of-order batches, where every blob parks and is later unlocked
   failpoint), `import_batch_keeps_explicitly_detached_doc_detached`,
   `failed_import_batch_reparks_prebatch_pending_changes`,
   `failed_import_batch_trims_only_its_own_entry_from_a_shared_pending_slot`,
-  `failed_import_reparks_only_preexisting_pending_changes`.
+  `failed_import_reparks_only_preexisting_pending_changes`,
+  `batch_graph_validation_failure_preserves_outer_rollback_and_pending`,
+  `detached_graph_batch_rejection_rolls_back_its_own_scope`.
 - `crates/loro/tests/contracts/sync_import.rs`:
   `import_batch_failure_leaves_doc_attached_and_unchanged`.
 - `crates/loro-internal/src/oplog/pending_changes.rs`: the `import_batch_*` regressions

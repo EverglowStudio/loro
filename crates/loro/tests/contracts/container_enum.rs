@@ -18,6 +18,10 @@ fn seed_container(container: &Container, label: &str) -> LoroResult<()> {
             let node = tree.create(TreeParentId::Root)?;
             tree.get_meta(node)?.insert("label", label)?;
         }
+        Container::Graph(graph) => {
+            let node = graph.create_node()?;
+            graph.node_meta(node)?.insert("label", label)?;
+        }
         #[cfg(feature = "counter")]
         Container::Counter(counter) => counter.increment(label.len() as f64)?,
         Container::Unknown(_) => unreachable!("Container::new cannot create Unknown"),
@@ -32,6 +36,7 @@ fn container_json(container: &Container) -> Value {
         Container::List(list) => list.get_deep_value().to_json_value(),
         Container::MovableList(list) => list.get_deep_value().to_json_value(),
         Container::Tree(tree) => tree.get_value_with_meta().to_json_value(),
+        Container::Graph(graph) => graph.get_deep_value().to_json_value(),
         #[cfg(feature = "counter")]
         Container::Counter(counter) => json!(counter.get()),
         Container::Unknown(_) => unreachable!("test never constructs unknown containers"),
@@ -52,6 +57,10 @@ fn expected_json(kind: ContainerType, label: &str) -> Value {
             "children": [],
             "fractional_index": "80",
         }]),
+        ContainerType::Graph => json!({
+            "nodes": [{ "id": "", "meta": { "label": label } }],
+            "edges": [],
+        }),
         #[cfg(feature = "counter")]
         ContainerType::Counter => json!(label.len() as f64),
         ContainerType::Unknown(_) => unreachable!("Container::new cannot create Unknown"),
@@ -77,9 +86,21 @@ fn assert_container_value(container: &Container, label: &str) {
     let value = container_json(container);
     if container.get_type() == ContainerType::Tree {
         assert_tree_shape_matches(value, label);
+    } else if container.get_type() == ContainerType::Graph {
+        assert_graph_shape_matches(value, label);
     } else {
         assert_eq!(value, expected_json(container.get_type(), label));
     }
+}
+
+fn assert_graph_shape_matches(value: Value, label: &str) {
+    let nodes = value["nodes"]
+        .as_array()
+        .expect("graph has a flat node table");
+    assert_eq!(nodes.len(), 1);
+    assert!(loro::GraphNodeId::try_from(nodes[0]["id"].as_str().unwrap()).is_ok());
+    assert_eq!(nodes[0]["meta"], json!({ "label": label }));
+    assert_eq!(value["edges"], json!([]));
 }
 
 #[test]
@@ -94,6 +115,7 @@ fn container_enum_trait_dispatch_attaches_all_container_kinds() -> LoroResult<()
         ContainerType::List,
         ContainerType::MovableList,
         ContainerType::Tree,
+        ContainerType::Graph,
         #[cfg(feature = "counter")]
         ContainerType::Counter,
     ];
@@ -130,6 +152,7 @@ fn container_enum_trait_dispatch_attaches_all_container_kinds() -> LoroResult<()
     assert_eq!(deep["root"]["list"], json!(["list"]));
     assert_eq!(deep["root"]["movablelist"], json!(["movablelist"]));
     assert_tree_shape_matches(deep["root"]["tree"].clone(), "tree");
+    assert_graph_shape_matches(deep["root"]["graph"].clone(), "graph");
     #[cfg(feature = "counter")]
     assert_eq!(deep["root"]["counter"], json!(7.0));
 

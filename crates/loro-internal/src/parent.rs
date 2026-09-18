@@ -73,6 +73,12 @@ impl DocState {
                     self.arena.set_parent(idx, Some(container));
                 }
             }
+            RawOpContent::Graph(op) => {
+                if let Some(cid) = op.created_meta() {
+                    let idx = self.arena.register_container(&cid);
+                    self.arena.set_parent(idx, Some(container));
+                }
+            }
             RawOpContent::Tree(tree) => {
                 let target = tree.target();
                 // create associated metadata container

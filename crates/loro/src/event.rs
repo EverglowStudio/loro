@@ -3,6 +3,7 @@ use delta::array_vec::ArrayVec;
 use delta::DeltaRope;
 use enum_as_inner::EnumAsInner;
 use loro_common::IdLp;
+pub use loro_internal::container::graph::GraphDiff;
 use loro_internal::container::ContainerID;
 pub use loro_internal::delta::TreeDiff;
 use loro_internal::delta::{ResolvedMapDelta, ResolvedMapValue};
@@ -62,6 +63,8 @@ pub enum Diff<'a> {
     Map(MapDelta<'a>),
     /// A tree diff.
     Tree(Cow<'a, TreeDiff>),
+    /// Native graph operations and changed records, including derived edge visibility.
+    Graph(Cow<'a, GraphDiff>),
     #[cfg(feature = "counter")]
     /// A counter diff.
     Counter(f64),
@@ -179,6 +182,7 @@ impl<'a> From<&'a DiffInner> for Diff<'a> {
                 Diff::Text(text)
             }
             DiffInner::Tree(t) => Diff::Tree(Cow::Borrowed(t)),
+            DiffInner::Graph(g) => Diff::Graph(Cow::Borrowed(g)),
             #[cfg(feature = "counter")]
             DiffInner::Counter(c) => Diff::Counter(*c),
             DiffInner::Unknown => Diff::Unknown,
@@ -232,6 +236,7 @@ impl From<DiffInner> for Diff<'static> {
                 Diff::Text(text)
             }
             DiffInner::Tree(t) => Diff::Tree(Cow::Owned(t.clone())),
+            DiffInner::Graph(g) => Diff::Graph(Cow::Owned(g)),
             #[cfg(feature = "counter")]
             DiffInner::Counter(c) => Diff::Counter(c),
             DiffInner::Unknown => Diff::Unknown,
@@ -328,6 +333,11 @@ fn validate_diff_for_apply(diff: &Diff<'_>) -> LoroResult<()> {
             }
         }
         Diff::Map(_) | Diff::Tree(_) | Diff::Unknown => {}
+        Diff::Graph(g) => {
+            for c in &g.ops {
+                c.op.validate(c.id)?;
+            }
+        }
         #[cfg(feature = "counter")]
         Diff::Counter(_) => {}
     }
@@ -408,6 +418,7 @@ impl From<Diff<'static>> for DiffInner {
                     .collect(),
             }),
             Diff::Tree(cow) => DiffInner::Tree(cow.into_owned()),
+            Diff::Graph(cow) => DiffInner::Graph(cow.into_owned()),
             #[cfg(feature = "counter")]
             Diff::Counter(c) => DiffInner::Counter(c),
             Diff::Unknown => DiffInner::Unknown,

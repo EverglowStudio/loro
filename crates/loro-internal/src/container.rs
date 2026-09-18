@@ -6,6 +6,7 @@
 //!
 use crate::{arena::SharedArena, InternalString, ID};
 
+pub mod graph;
 pub mod list;
 pub mod map;
 pub mod richtext;
