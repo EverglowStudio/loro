@@ -13,7 +13,7 @@ pub enum LoroValue {
   List(Array[LoroValue])
   Map(Array[(UInt64, LoroValue)]) // (key_idx, value)
   ContainerType(Byte)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum Value {
@@ -35,7 +35,7 @@ pub enum Value {
   ListSet(ListSet)
   RawTreeMove(RawTreeMove)
   Future(Byte, Bytes) // (raw tag byte, binary payload bytes)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub struct MarkStart {
@@ -43,7 +43,7 @@ pub struct MarkStart {
   len : UInt64
   key_idx : UInt64
   value : LoroValue
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub struct TreeMove {
@@ -51,21 +51,21 @@ pub struct TreeMove {
   is_parent_null : Bool
   position : UInt64
   parent_idx : UInt64?
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub struct ListMove {
   from : UInt64
   from_idx : UInt64
   lamport : UInt64
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub struct ListSet {
   peer_idx : UInt64
   lamport : UInt
   value : LoroValue
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub struct RawTreeMove {
@@ -75,4 +75,4 @@ pub struct RawTreeMove {
   is_parent_null : Bool
   parent_peer_idx : UInt64
   parent_cnt : Int
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)

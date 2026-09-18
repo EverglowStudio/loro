@@ -1,5 +1,13 @@
 import packageMetadata from "../../package.json" with { type: "json" };
 
+import { assertSupportedJsonUpdates } from "./json-updates";
+import {
+  assertSupportedChangeBlock,
+  assertSupportedDecodedChangeBlock,
+  decodeLazyStateSnapshotStore,
+  decodeStateSnapshotStore,
+} from "./reader-support";
+
 import { bytesEqual, bytesToHex, hexToBytes } from "../codec/bytes";
 import {
   decodeChangeBlock,
@@ -24,8 +32,6 @@ import {
 import { decodeChangeBlockKey, encodeChangeBlockKey } from "../codec/id";
 import { decodeSstable, encodeSstable, type SstableEntry } from "../codec/sstable";
 import {
-  decodeLazyStateSnapshotStore,
-  decodeStateSnapshotStore,
   encodeStateSnapshotStore,
   getLazyStateSnapshotContainer,
   rewriteLazyStateSnapshotStore,
@@ -74,6 +80,7 @@ import {
 } from "./containers";
 import { SequenceEventDiff } from "./event-diff";
 import {
+  assertSupportedContainerId,
   codecTypeToPublic,
   containerIdsEqual,
   formatContainerId,
@@ -622,6 +629,7 @@ export class LoroDoc<T extends Record<string, Container> = Record<string, Contai
         `unsupported JSON schema version ${String(parsed.schema_version)}`,
       );
     }
+    assertSupportedJsonUpdates(parsed);
     const records = jsonSchemaToHistoryRecords(parsed);
     return this.import(this.#encodeUpdates(records));
   }
@@ -724,6 +732,9 @@ export class LoroDoc<T extends Record<string, Container> = Record<string, Contai
         canonicalStartMetadata =
           encodedStartVersion !== undefined && encodedStartFrontiers !== undefined;
       }
+      if (!initializeFromSnapshot && isShallowSnapshot) {
+        decodeLazyStateSnapshotStore(snapshot.shallowRootState);
+      }
 
       const canUseLazyState =
         initializeFromSnapshot &&
@@ -777,6 +788,10 @@ export class LoroDoc<T extends Record<string, Container> = Record<string, Contai
           (stateStore?.kind === "sstable" && hydratedStore?.kind === "sstable"));
 
       if (canDeferHistory) {
+        // A Graph may exist only in an older block, outside the frontier blocks.
+        for (const entry of oplogEntries) {
+          if (entry.key.length === 12) assertSupportedChangeBlock(entry.value);
+        }
         const endVersion = encodedEndVersion!;
         const endFrontiers = encodedEndFrontiers!;
         const validatedBlocks = this.#validateDeferredFrontierBlocks(
@@ -1186,13 +1201,29 @@ export class LoroDoc<T extends Record<string, Container> = Record<string, Contai
     if (this.#detached && !this.#detachedEditing) {
       throw new Error("cannot edit a detached document; call attach() first");
     }
-
-    const containerRemap = new Map<ContainerID, Container>();
-    const treeRemap = new Map<TreeID, TreeID>();
+    // Check container references and map binary markers before writing any diff.
     for (const entry of diffBatch) {
       if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") {
         throw new TypeError("each diff entry must be a [ContainerID, Diff] tuple");
       }
+      const [id, diff] = entry;
+      assertSupportedContainerId(id);
+      if (diff.type === "map") {
+        for (const [key, value] of Object.entries(diff.updated)) {
+          diffContainerId(value);
+          if (value instanceof Uint8Array) {
+            parseMergeableMarker(parseContainerId(id), key, value);
+          }
+        }
+      } else if (diff.type === "list") {
+        for (const operation of diff.diff) {
+          if ("insert" in operation) operation.insert.forEach(diffContainerId);
+        }
+      }
+    }
+    const containerRemap = new Map<ContainerID, Container>();
+    const treeRemap = new Map<TreeID, TreeID>();
+    for (const entry of diffBatch) {
       const sourceId = entry[0] as ContainerID;
       const diff = entry[1];
       const container = this.#resolveDiffContainer(sourceId, containerRemap);
@@ -3479,8 +3510,7 @@ export class LoroDoc<T extends Record<string, Container> = Record<string, Contai
   }
 
   #readChangeBlock(bytes: Uint8Array): HistoryRecord[] {
-    const block = decodeChangeBlock(bytes);
-    return block.changes.map((change) => ({ change, keys: block.keys }));
+    return decodeHistoryRecordBlock(bytes);
   }
 
   #decodeImportData(parsed: ParsedDocument): DecodedImportData {
@@ -3494,6 +3524,9 @@ export class LoroDoc<T extends Record<string, Container> = Record<string, Contai
     }
 
     const snapshot = decodeFastSnapshotBody(parsed.body);
+    // Validate every batch member, including snapshots that are not chosen as the seed.
+    decodeLazyStateSnapshotStore(snapshot.state);
+    decodeLazyStateSnapshotStore(snapshot.shallowRootState);
     const records: HistoryRecord[] = [];
     let startVersion: VersionVector | undefined;
     let startFrontiers: CodecId[] | undefined;
@@ -6151,6 +6184,8 @@ export function decodeImportBlobMeta(
   }
 
   const snapshot = decodeFastSnapshotBody(parsed.body);
+  decodeLazyStateSnapshotStore(snapshot.state);
+  decodeLazyStateSnapshotStore(snapshot.shallowRootState);
   const records: HistoryRecord[] = [];
   let startVersion = new VersionVector();
   let endVersion = new VersionVector();
@@ -6209,6 +6244,7 @@ export function decodeImportBlobMeta(
 
 function decodeHistoryRecordBlock(bytes: Uint8Array): HistoryRecord[] {
   const block = decodeChangeBlock(bytes);
+  assertSupportedDecodedChangeBlock(block);
   return block.changes.map((change) => ({ change, keys: block.keys }));
 }
 
@@ -6222,6 +6258,7 @@ function diffContainerId(value: unknown): ContainerID | undefined {
   if (isContainer(value)) return value.id;
   if (typeof value !== "string" || !value.startsWith("🦜:")) return undefined;
   const id = value.slice("🦜:".length);
+  assertSupportedContainerId(id);
   return isContainerId(id) ? (id as ContainerID) : undefined;
 }
 

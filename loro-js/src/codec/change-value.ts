@@ -1,4 +1,5 @@
 import { ByteReader, ByteWriter } from "./bytes";
+import { containerTypeFromRawByte } from "./container-id";
 import { LoroDecodeError, LoroEncodeError, decodeAssert } from "./errors";
 import { readSleb128, readUleb128, writeSleb128, writeUleb128 } from "./leb128";
 
@@ -354,8 +355,11 @@ export function readChangeLoroValue(reader: ByteReader, depth = 0): ChangeLoroVa
       }
       return { type: "map", value };
     }
-    case 9:
-      return { type: "container-type", value: reader.readU8() };
+    case 9: {
+      const value = reader.readU8();
+      containerTypeFromRawByte(value);
+      return { type: "container-type", value };
+    }
     default:
       throw new LoroDecodeError("invalid change LoroValue kind", reader.position - 1);
   }

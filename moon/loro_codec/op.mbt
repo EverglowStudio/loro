@@ -2,7 +2,7 @@
 pub struct IdLp {
   peer : UInt64
   lamport : UInt
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub fn IdLp::new(peer : UInt64, lamport : UInt) -> IdLp {
@@ -22,7 +22,7 @@ pub fn IdLp::lamport(self : IdLp) -> UInt {
 ///|
 pub struct FractionalIndex {
   bytes : Bytes
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub fn FractionalIndex::new(bytes : Bytes) -> FractionalIndex {
@@ -38,7 +38,7 @@ pub fn FractionalIndex::bytes(self : FractionalIndex) -> Bytes {
 pub enum ListOp {
   Insert(UInt, Array[LoroValue])
   Delete(Int, Int64, ID) // (pos, len, start_id)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum MovableListOp {
@@ -46,13 +46,13 @@ pub enum MovableListOp {
   Delete(Int, Int64, ID) // (pos, len, start_id)
   Move(UInt, UInt, IdLp) // (from, to, elem_id)
   Set(IdLp, LoroValue)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum MapOp {
   Insert(String, LoroValue)
   Delete(String)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum TextOp {
@@ -60,19 +60,19 @@ pub enum TextOp {
   Delete(Int, Int64, ID) // (pos, len, start_id)
   Mark(UInt, UInt, String, LoroValue, Byte) // (start,end,key,value,info)
   MarkEnd
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum TreeOp {
   Create(ID, ID?, FractionalIndex)
   Move(ID, ID?, FractionalIndex)
   Delete(ID)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum FutureOp {
   Unknown(Int, Value) // (prop, raw encoded value)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub enum OpContent {
@@ -82,7 +82,7 @@ pub enum OpContent {
   Text(TextOp)
   Tree(TreeOp)
   Future(FutureOp)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub struct Op {
@@ -90,7 +90,7 @@ pub struct Op {
   counter : Int
   len : UInt
   content : OpContent
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub fn Op::new(

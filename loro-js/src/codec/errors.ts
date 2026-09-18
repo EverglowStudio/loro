@@ -8,6 +8,16 @@ export class LoroDecodeError extends Error {
   }
 }
 
+/** Graph is recognized, but its operations and state are not supported here. */
+export class LoroUnsupportedGraphError extends LoroDecodeError {
+  readonly code = "UNSUPPORTED_GRAPH";
+
+  constructor() {
+    super("unsupported Graph container (type 6)");
+    this.name = "LoroUnsupportedGraphError";
+  }
+}
+
 export class LoroEncodeError extends Error {
   constructor(message: string) {
     super(message);

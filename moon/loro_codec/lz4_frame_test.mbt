@@ -50,7 +50,7 @@ test "lz4 frame: compressed block overlap copy" {
 }
 
 ///|
-fn repeat_byte(byte : Byte, n : Int) -> Bytes {
+fn lz4_repeat_byte(byte : Byte, n : Int) -> Bytes {
   let w = BytesWriter::new()
   for _i in 0..<n {
     w.write_u8(byte)
@@ -60,7 +60,7 @@ fn repeat_byte(byte : Byte, n : Int) -> Bytes {
 
 ///|
 test "lz4 frame: encode/decode roundtrip (repetitive)" {
-  let input = repeat_byte(b'a', 4096)
+  let input = lz4_repeat_byte(b'a', 4096)
   let encoded = lz4_compress_frame(input) catch { EncodeError(_) => b"" }
   let out = lz4_decompress_frame(encoded[:], true) catch { DecodeError(_) => b"" }
   assert_eq(out, input)

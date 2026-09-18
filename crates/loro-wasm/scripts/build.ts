@@ -28,9 +28,13 @@ const TARGETS = ["bundler", "browser", "nodejs", "web"];
 const startTime = performance.now();
 const LoroWasmDir = path.resolve(__dirname, "..");
 const WorkspaceCargoToml = path.resolve(__dirname, "../../../Cargo.toml");
-const RawWasmPath = path.resolve(
+const CargoTargetDir = path.resolve(
   LoroWasmDir,
-  "../../target/wasm32-unknown-unknown",
+  Deno.env.get("CARGO_TARGET_DIR") ?? "../../target",
+);
+const RawWasmPath = path.resolve(
+  CargoTargetDir,
+  "wasm32-unknown-unknown",
   profileDir,
   "loro_wasm.wasm",
 );
@@ -39,7 +43,8 @@ const wasmPackageJson = JSON.parse(
 );
 const LoroWasmVersion = (wasmPackageJson as { version: string }).version;
 const MapPackageDir = path.resolve(__dirname, "../../loro-wasm-map");
-const WASM_SOURCEMAP_BASE = `https://unpkg.com/loro-crdt-map@${LoroWasmVersion}`;
+const WASM_SOURCEMAP_BASE =
+  `https://unpkg.com/loro-crdt-map@${LoroWasmVersion}`;
 const EMBED_SCRIPT = path.resolve(
   __dirname,
   "../../../scripts/embed-wasm-sourcemap.mjs",
@@ -144,7 +149,7 @@ async function build() {
 
           const sizeReportMarker = "<!-- loro-wasm-size-report -->";
           const existingComment = comments.find((comment) =>
-            comment.body?.includes(sizeReportMarker),
+            comment.body?.includes(sizeReportMarker)
           );
 
           if (existingComment) {
@@ -184,26 +189,27 @@ async function cargoBuild() {
     profile,
   ];
   console.log(cmd.join(" "));
-  const env: Record<string, string> | undefined =
-    profile === "release"
-      ? (() => {
-          const existing = Deno.env.get("RUSTFLAGS");
-          const next = ["-C debuginfo=2"];
-          if (existing && existing.length > 0) {
-            next.unshift(existing);
-          }
-          return {
-            RUSTFLAGS: next.join(" "),
-            CARGO_PROFILE_RELEASE_DEBUG: "true",
-            CARGO_PROFILE_RELEASE_STRIP: "none",
-          };
-        })()
-      : undefined;
-  const status = await Deno.run({
-    cmd,
+  const env: Record<string, string> | undefined = profile === "release"
+    ? (() => {
+      const existing = Deno.env.get("RUSTFLAGS");
+      const next = ["-C debuginfo=2"];
+      if (existing && existing.length > 0) {
+        next.unshift(existing);
+      }
+      return {
+        RUSTFLAGS: next.join(" "),
+        CARGO_PROFILE_RELEASE_DEBUG: "true",
+        CARGO_PROFILE_RELEASE_STRIP: "none",
+      };
+    })()
+    : undefined;
+  const status = await new Deno.Command(cmd[0], {
+    args: cmd.slice(1),
     cwd: LoroWasmDir,
     env,
-  }).status();
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn().status;
   if (!status.success) {
     console.log(
       "❌",
@@ -227,9 +233,27 @@ async function buildTarget(target: string) {
 
   // TODO: polyfill FinalizationRegistry
   const bindgenTarget = target === "browser" ? "bundler" : target;
-  const cmd = `wasm-bindgen --keep-debug --weak-refs --target ${bindgenTarget} --out-dir ${target} ${RawWasmPath}`;
-  console.log(">", cmd);
-  await Deno.run({ cmd: cmd.split(" "), cwd: LoroWasmDir }).status();
+  const args = [
+    "--keep-debug",
+    "--weak-refs",
+    "--target",
+    bindgenTarget,
+    "--out-dir",
+    target,
+    RawWasmPath,
+  ];
+  console.log(">", "wasm-bindgen", ...args);
+  const status = await new Deno.Command("wasm-bindgen", {
+    args,
+    cwd: LoroWasmDir,
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn().status;
+  if (!status.success) {
+    throw new Error(
+      `wasm-bindgen failed for ${target} with code ${status.code}`,
+    );
+  }
   console.log();
 
   await postProcessWasm(targetDirPath, target);
@@ -246,7 +270,9 @@ async function buildTarget(target: string) {
     }).output();
     if (!snippets.success) {
       throw new Error(
-        `CommonJS snippet conversion failed: ${textDecoder.decode(snippets.stderr)}`,
+        `CommonJS snippet conversion failed: ${
+          textDecoder.decode(snippets.stderr)
+        }`,
       );
     }
 
@@ -288,10 +314,9 @@ async function buildTarget(target: string) {
 }
 
 async function installContainerIdCache(targetDirPath: string, target: string) {
-  const generatedBinding =
-    target === "bundler" || target === "browser"
-      ? "loro_wasm_bg.js"
-      : "loro_wasm.js";
+  const generatedBinding = target === "bundler" || target === "browser"
+    ? "loro_wasm_bg.js"
+    : "loro_wasm.js";
   const generatedBindingPath = path.resolve(targetDirPath, generatedBinding);
   const patch = await Deno.readTextFile(
     path.resolve(__dirname, "./container_id_cache_patch.js"),
@@ -410,10 +435,12 @@ async function embedSourcemap(target: string) {
     workspaceRoot,
   ];
   console.log(">", cmd.join(" "));
-  const status = await Deno.run({
-    cmd,
+  const status = await new Deno.Command(cmd[0], {
+    args: cmd.slice(1),
     cwd: LoroWasmDir,
-  }).status();
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn().status;
   if (!status.success) {
     throw new Error("embed-wasm-sourcemap failed");
   }

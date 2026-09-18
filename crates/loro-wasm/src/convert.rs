@@ -14,8 +14,8 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{
     frontiers_to_ids, Container, Cursor, JsContainer, JsIdSpan, JsImportBlobMetadata, JsJsonSchema,
-    JsJsonSchemaOrString, JsResult, LoroCounter, LoroList, LoroMap, LoroMovableList, LoroText,
-    LoroTree, VersionVector,
+    JsJsonSchemaOrString, JsResult, LoroCounter, LoroGraph, LoroList, LoroMap, LoroMovableList,
+    LoroText, LoroTree, VersionVector,
 };
 use wasm_bindgen::__rt::{IntoJsResult, RcRef, WasmRefCell};
 use wasm_bindgen::convert::RefFromWasmAbi;
@@ -109,13 +109,13 @@ pub(crate) fn js_to_container(js: JsContainer) -> JsResult<Container> {
             let obj = ref_from_checked_abi::<LoroCounter>(ptr_u32, "LoroCounter")?;
             Container::Counter(obj.clone())
         }
+        "Graph" => {
+            let obj = ref_from_checked_abi::<LoroGraph>(ptr_u32, "LoroGraph")?;
+            Container::Graph(obj.clone())
+        }
         _ => {
             return Err(JsValue::from_str(
-                format!(
-                    "Value kind is {} but the valid container name is Map, List, Text or Tree",
-                    kind
-                )
-                .as_str(),
+                format!("Invalid container kind: {}", kind).as_str(),
             ));
         }
     };
@@ -172,6 +172,10 @@ pub(crate) fn resolved_diff_to_js(value: &Diff, for_json: bool) -> JsResult<JsVa
         Diff::Tree(tree) => {
             js_sys::Reflect::set(&obj, &JsValue::from_str("type"), &JsValue::from_str("tree"))?;
             js_sys::Reflect::set(&obj, &JsValue::from_str("diff"), &tree.into())?;
+        }
+        Diff::Graph(graph) => {
+            Reflect::set(&obj, &"type".into(), &"graph".into())?;
+            Reflect::set(&obj, &"diff".into(), &crate::graph::diff_to_js(graph)?)?;
         }
         Diff::List(list) => {
             // set type as "list"
@@ -262,6 +266,10 @@ pub(crate) fn js_diff_to_inner_diff(js: JsValue) -> JsResult<Diff> {
             let diff = js_sys::Reflect::get(&obj, &"diff".into())?;
             let tree_diff = (&diff).try_into()?;
             Ok(Diff::Tree(tree_diff))
+        }
+        "graph" => {
+            let diff = Reflect::get(&obj, &"diff".into())?;
+            Ok(Diff::Graph(crate::graph::diff_from_js(diff)?))
         }
         "list" => {
             let diff = js_sys::Reflect::get(&obj, &"diff".into())?;
@@ -459,6 +467,7 @@ pub(crate) fn handler_to_js_value(handler: Handler, for_json: bool) -> JsResult<
         Handler::Tree(t) => LoroTree { handler: t }.into(),
         Handler::MovableList(m) => LoroMovableList { handler: m }.into(),
         Handler::Counter(c) => LoroCounter { handler: c }.into(),
+        Handler::Graph(g) => LoroGraph { handler: g }.into(),
         Handler::Unknown(_) => {
             return Err(JsValue::from_str(
                 "You are attempting to access an unknown container, which may be created by a newer version of loro-crdt",

@@ -2,7 +2,7 @@
 pub enum ContainerID {
   Root(String, ContainerType)
   Normal(UInt64, Int, ContainerType)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub fn ContainerID::root(name : String, kind : ContainerType) -> ContainerID {

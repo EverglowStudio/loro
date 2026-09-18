@@ -1,3 +1,4 @@
+import { assertSupportedContainerId } from "./ids";
 import type { JsonOp, JsonSchema, JsonValue, PeerID } from "./types";
 
 export type VersionRange = Readonly<Record<string, readonly [number, number]>>;
@@ -7,6 +8,7 @@ export function redactJsonUpdates(
   versionRange: VersionRange,
 ): JsonSchema {
   const parsed = typeof input === "string" ? (JSON.parse(input) as JsonSchema) : input;
+  assertSupportedJsonUpdates(parsed);
   const schema = cloneJsonUpdateValue(parsed) as JsonSchema;
   for (const change of schema.changes) {
     const peerToken = change.id.slice(change.id.indexOf("@") + 1);
@@ -17,6 +19,29 @@ export function redactJsonUpdates(
     for (const operation of change.ops) redactOperation(operation, range);
   }
   return schema;
+}
+
+export function assertSupportedJsonUpdates(schema: JsonSchema): void {
+  if (!Array.isArray(schema.changes)) return;
+  const checkValue = (value: unknown): void => {
+    if (typeof value === "string" && value.startsWith("🦜:")) {
+      assertSupportedContainerId(value.slice("🦜:".length));
+    } else if (Array.isArray(value)) {
+      value.forEach(checkValue);
+    } else if (
+      value !== null && typeof value === "object" && !(value instanceof Uint8Array)
+    ) {
+      Object.values(value).forEach(checkValue);
+    }
+  };
+  for (const change of schema.changes) {
+    for (const operation of change.ops) {
+      assertSupportedContainerId(operation.container);
+      const content = operation.content as unknown as Record<string, unknown>;
+      checkValue(content.value);
+      checkValue(content.style_value);
+    }
+  }
 }
 
 function redactOperation(operation: JsonOp, range: readonly [number, number]): void {

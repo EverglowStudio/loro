@@ -143,6 +143,88 @@ test('sync example', () => {
 });
 ```
 
+# Native graphs in this fork
+
+`LoroGraph` is a directed property multigraph container. It accepts cycles,
+self-loops, parallel edges, shared nodes, and isolated nodes. Documents containing
+Graph require a compatible version of this fork.
+
+Nodes and edges have separate string ID types, `GraphNodeId` and `GraphEdgeId`.
+Keep the complete `counter@peer` string: the peer is an unsigned 64-bit identity
+and cannot safely be converted to a JavaScript number. Metadata uses stable
+associated maps and can contain nested Text, List, Map, or Graph containers.
+Edge endpoints are immutable; changing them requires deleting and creating an
+edge.
+
+```ts
+import { LoroDoc, LoroText } from "loro-crdt";
+
+const left = new LoroDoc();
+left.setPeerId("1");
+const graph = left.getGraph("links");
+const a = graph.createNode();
+const b = graph.createNode();
+graph.nodeMeta(a).setContainer("text", new LoroText()).insert(0, "shared content");
+left.commit();
+
+const right = left.fork();
+right.setPeerId("2");
+graph.createEdge(a, b);
+right.getGraph("links").createEdge(b, a);
+const l = left.export({ mode: "update" });
+const r = right.export({ mode: "update" });
+left.import(r);
+right.import(l);
+// Both edges remain visible: concurrent creation of a cycle is valid.
+```
+
+`nodes`, `edges`, `getNode`, `getEdge`, adjacency queries, and counts describe the
+visible graph. `nodeRecord`, `edgeRecord`, `nodeRecords`, and `edgeRecords` also
+expose deleted records and active deletion tags. An edge can be alive but hidden
+because an endpoint is deleted. Deleting a node does not delete its edge records;
+restoring the node can reveal those edges again. Explicitly deleted edges stay
+deleted until restored. Restoration only clears deletions the replica observed.
+
+`predecessors` and `successors` return unique neighbors. `traverse(start,
+maxDepth, maxNodes)` performs outgoing breadth-first traversal with a visited
+set and explicit bounds. `toJSON`, `getShallowValue`, and `toContainerTree` use
+flat node/edge tables and never recursively follow graph edges. The container
+tree resolves metadata as typed container nodes, including its selected text
+format.
+
+Create a detached graph with `new LoroGraph()` and attach it through
+`map.setContainer` or `list.insertContainer`. Attachment allocates new IDs; use
+the returned attached graph's IDs. `parent`, `isAttached`, `getAttached`,
+`isDeleted`, subscriptions, and document lookup follow the other containers.
+
+Cycle analysis and repair are explicit:
+
+```ts
+left.commit(); // snapshot() refuses pending edits; it never commits implicitly.
+const snapshot = graph.snapshot();
+const report = snapshot.analyzeCycles();
+const plan = snapshot.planBreakCycles();
+console.log(report.cyclicComponents, plan.toJSON());
+
+// Apply only after the caller chooses to accept the plan.
+graph.applyRepair(plan);
+left.commit({ origin: "explicit-graph-repair" });
+```
+
+Pass an edge-ID array to `analyzeCycles` or `planBreakCycles` to restrict the
+scope; `[]` selects no edges. The default `ascending-node-id-v1` policy is
+deterministic and does not minimize deletions. Snapshot and plan objects retain
+their native data; editing a `toJSON()` result cannot alter a plan, and JSON
+objects cannot be passed to `applyRepair`.
+
+Applying a plan checks its graph and captured DocState version atomically before
+generating ordinary edge deletions. Helper errors include a stable `code`, such
+as `UncommittedChanges`, `StalePlan`, `WrongGraph`, or `InvalidSelection`. An empty
+current plan writes nothing. A nonempty plan cannot be applied again while edits
+are pending and becomes stale after commit. Recompute stale plans explicitly.
+Import never reruns the policy, and later creation or restoration can form cycles
+again. Concurrent repairs may delete more edges than a single global plan.
+
 # Blog
 
 - [Loro 1.0](https://loro.dev/blog/v1.0)

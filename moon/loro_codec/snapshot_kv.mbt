@@ -20,6 +20,15 @@ pub fn transcode_oplog_kv_store(
   validate : Bool,
 ) -> Bytes raise DecodeError {
   let kvs = sstable_import_all(oplog_bytes, validate)
+  // Capability checks also apply when optional consistency validation is disabled.
+  if !validate {
+    for kv in kvs {
+      let (k, v) = kv
+      if k.length() == 12 {
+        let _ = decode_change_block(v[:])
+      }
+    }
+  }
   if validate {
     let mut seen_vv = false
     let mut seen_fr = false
@@ -138,6 +147,7 @@ pub fn transcode_state_kv_store(
       out_kvs.push((k, v))
       continue
     }
+    let _ = container_id_from_bytes(k[:])
     let wrapper = parse_container_wrapper(v[:])
     let payload = transcode_container_state_snapshot(
       wrapper.kind(),

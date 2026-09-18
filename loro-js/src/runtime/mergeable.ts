@@ -2,6 +2,7 @@ import {
   containerTypeFromRawByte,
   containerTypeToRawByte,
   encodeContainerId,
+  unknownContainerType,
 } from "../codec/container-id";
 import {
   ContainerType,
@@ -64,6 +65,11 @@ export function parseMergeableMarker(
 ): CodecContainerType | undefined {
   if (!(value instanceof Uint8Array) || value.length !== 8) return undefined;
   if (!MARKER_MAGIC.every((byte, index) => value[index] === byte)) return undefined;
+  if (value[4] === 6) {
+    // Arbitrary binary values that only resemble a marker are still user data.
+    const expected = mergeableMarker(parent, key, unknownContainerType(6));
+    if (!expected.every((byte, index) => value[index] === byte)) return undefined;
+  }
   const type = containerTypeFromRawByte(value[4]!);
   if (typeof type !== "string") return undefined;
   const expected = mergeableMarker(parent, key, type);

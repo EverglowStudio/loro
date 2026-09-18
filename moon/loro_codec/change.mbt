@@ -6,7 +6,7 @@ pub struct Change {
   lamport : UInt
   msg : String?
   ops : Array[Op]
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub fn Change::new(

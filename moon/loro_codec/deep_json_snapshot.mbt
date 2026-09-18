@@ -384,7 +384,13 @@ fn deep_json_from_state_kv_store(
     let cid = container_id_from_bytes(k[:])
     let key = bytes_hex_upper(k)
     let wrapper = parse_container_wrapper(v[:])
-    entries.set(key, (wrapper.kind(), wrapper.payload_view().to_bytes()))
+    // Check all states, including descendants that are not reachable from a root.
+    let payload = transcode_container_state_snapshot(
+      wrapper.kind(),
+      wrapper.payload_view(),
+      validate,
+    )
+    entries.set(key, (wrapper.kind(), payload))
     match cid {
       ContainerID::Root(name, _kind) => roots.push((name, key))
       ContainerID::Normal(_, _, _) => ()
@@ -411,6 +417,16 @@ pub fn export_deep_json_from_fast_snapshot(
     raise DecodeError("deep-json: not a FastSnapshot (mode=3) document")
   }
   let parsed = parse_fast_snapshot_body(doc.body_view())
+  // Deep JSON omits history and shallow-root state from its output, but must not
+  // hide unsupported containers found in either section.
+  let _ = transcode_oplog_kv_store(
+    parsed.oplog_bytes_view().to_bytes(),
+    validate,
+  )
+  let _ = transcode_state_kv_store(
+    parsed.shallow_root_state_bytes_view().to_bytes(),
+    validate,
+  )
   let root = deep_json_from_state_kv_store(
     parsed.state_bytes_view().to_bytes(),
     validate,

@@ -1,5 +1,5 @@
 import { ByteReader, ByteWriter } from "./bytes";
-import { LoroDecodeError, LoroEncodeError } from "./errors";
+import { LoroDecodeError, LoroEncodeError, LoroUnsupportedGraphError } from "./errors";
 import { readUlebNumber, writeUleb128 } from "./leb128";
 import { PostcardReader, PostcardWriter } from "./postcard";
 import {
@@ -52,6 +52,8 @@ export function containerTypeFromRawByte(value: number): ContainerTypeValue {
       return ContainerType.MovableList;
     case 5:
       return ContainerType.Counter;
+    case 6:
+      throw new LoroUnsupportedGraphError();
     default:
       return { kind: "unknown", value };
   }
@@ -91,6 +93,8 @@ export function containerTypeFromHistoricalByte(value: number): ContainerTypeVal
       return ContainerType.Tree;
     case 5:
       return ContainerType.Counter;
+    case 6:
+      throw new LoroUnsupportedGraphError();
     default:
       return { kind: "unknown", value };
   }

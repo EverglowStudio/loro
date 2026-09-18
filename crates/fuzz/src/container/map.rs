@@ -227,7 +227,8 @@ impl Actionable for MapAction {
                     ContainerType::Counter => handler
                         .ensure_mergeable_counter(key)
                         .map(|c| c.to_container()),
-                    ContainerType::Unknown(_) => return None,
+                    ContainerType::Graph => panic!("Graph requires the dedicated graph_model causal-history driver; this legacy actor driver has no Graph target"),
+            ContainerType::Unknown(_) => return None,
                 };
                 match result {
                     Ok(c) => Some(c),

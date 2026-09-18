@@ -49,6 +49,7 @@ impl ActionInner {
             ContainerType::Text => Self::Text(TextAction::from_generic_action(action)),
             ContainerType::Tree => Self::Tree(TreeAction::from_generic_action(action)),
             ContainerType::Counter => Self::Counter(CounterAction::from_generic_action(action)),
+            ContainerType::Graph => panic!("Graph requires the dedicated graph_model causal-history driver; this legacy actor driver has no Graph target"),
             ContainerType::Unknown(_) => unreachable!(),
         }
     }

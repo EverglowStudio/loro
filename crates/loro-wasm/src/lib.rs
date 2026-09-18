@@ -52,6 +52,8 @@ use wasm_bindgen::{prelude::*, throw_val};
 use wasm_bindgen_derive::TryFromJsValue;
 mod counter;
 pub use counter::LoroCounter;
+mod graph;
+pub use graph::{GraphRepairPlan, GraphSnapshot, LoroGraph};
 mod awareness;
 mod log;
 use crate::{
@@ -583,6 +585,7 @@ fn container_type_to_str(ty: ContainerType) -> &'static str {
         ContainerType::MovableList => "MovableList",
         ContainerType::Tree => "Tree",
         ContainerType::Counter => "Counter",
+        ContainerType::Graph => "Graph",
         ContainerType::Unknown(_) => "Unknown",
     }
 }
@@ -1314,6 +1317,19 @@ impl LoroDoc {
         })
     }
 
+    /// Get a root Graph by name, or an existing Graph by container ID.
+    #[wasm_bindgen(js_name = "getGraph")]
+    pub fn get_graph(&self, cid: &JsIntoContainerID) -> JsResult<LoroGraph> {
+        let container_id = js_value_to_container_id(cid, ContainerType::Graph)?;
+        if !self.doc.has_container(&container_id) {
+            return Err(JsValue::from_str("The container does not exist in the doc"));
+        }
+        ensure_expected_container_type(&container_id, ContainerType::Graph)?;
+        Ok(LoroGraph {
+            handler: self.doc.get_graph(container_id),
+        })
+    }
+
     /// Get a LoroTree by container id
     ///
     /// The object returned is a new js object each time because it need to cross
@@ -1424,6 +1440,10 @@ impl LoroDoc {
                 let counter = self.doc.get_counter(container_id);
                 LoroCounter { handler: counter }.into()
             }
+            ContainerType::Graph => LoroGraph {
+                handler: self.doc.get_graph(container_id),
+            }
+            .into(),
             ContainerType::Unknown(_) => {
                 return Err(JsValue::from_str(
                     "You are attempting to get an unknown container",
@@ -6086,6 +6106,7 @@ enum Container {
     Tree(LoroTree),
     MovableList(LoroMovableList),
     Counter(LoroCounter),
+    Graph(LoroGraph),
 }
 
 impl Container {
@@ -6097,6 +6118,7 @@ impl Container {
             Container::Tree(t) => Handler::Tree(t.handler.clone()),
             Container::MovableList(l) => Handler::MovableList(l.handler.clone()),
             Container::Counter(c) => Handler::Counter(c.handler.clone()),
+            Container::Graph(g) => Handler::Graph(g.handler.clone()),
         }
     }
 }
@@ -6290,7 +6312,7 @@ const TYPES: &'static str = r#"
 * const text = list.insertContainer(1, new LoroText());
 * ```
 */
-export type ContainerType = "Text" | "Map" | "List"| "Tree" | "MovableList" | "Counter";
+export type ContainerType = "Text" | "Map" | "List"| "Tree" | "MovableList" | "Counter" | "Graph";
 
 export type PeerID = `${number}`;
 export type TextPosType = "unicode" | "utf16" | "utf8";
@@ -6666,7 +6688,7 @@ export type UndoConfig = {
     onPush?: (isUndo: boolean, counterRange: { start: number, end: number }, event?: LoroEventBatch) => { value: Value, cursors: Cursor[] },
     onPop?: (isUndo: boolean, value: { value: Value, cursors: Cursor[] }, counterRange: { start: number, end: number }) => void
 };
-export type Container = LoroList | LoroMap | LoroText | LoroTree | LoroMovableList | LoroCounter;
+export type Container = LoroList | LoroMap | LoroText | LoroTree | LoroMovableList | LoroCounter | LoroGraph;
 
 export interface ImportBlobMetadata {
     /**
@@ -6894,7 +6916,7 @@ export type ExportMode = {
 export type JsonOp = {
   container: ContainerID,
   counter: number,
-  content: ListOp | TextOp | MapOp | TreeOp | MovableListOp | UnknownOp
+  content: ListOp | TextOp | MapOp | TreeOp | MovableListOp | GraphJsonOp | UnknownOp
 }
 
 export type ListOp = {
@@ -7102,8 +7124,8 @@ export type CounterDiff = {
     increment: number;
 };
 
-export type Diff = ListDiff | TextDiff | MapDiff | TreeDiff | CounterDiff;
-export type JsonDiff = ListJsonDiff | TextDiff | MapJsonDiff | CounterDiff | TreeDiff;
+export type Diff = ListDiff | TextDiff | MapDiff | TreeDiff | CounterDiff | GraphDiff;
+export type JsonDiff = ListJsonDiff | TextDiff | MapJsonDiff | CounterDiff | TreeDiff | GraphDiff;
 export type Subscription = () => void;
 type NonNullableType<T> = Exclude<T, null | undefined>;
 export type AwarenessListener = (

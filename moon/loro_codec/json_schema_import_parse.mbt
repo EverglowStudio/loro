@@ -3,9 +3,8 @@ fn jsonschema_import_parse_uint64_decimal(
   s : String,
   what : String,
 ) -> UInt64 raise DecodeError {
-  @strconv.parse_uint64(s[:]) catch {
-    @strconv.StrConvError(err) =>
-      raise DecodeError("jsonschema_import: invalid " + what + ": " + err)
+  @string.parse_uint64(s[:]) catch {
+    err => raise DecodeError("jsonschema_import: invalid " + what + ": \{err}")
   }
 }
 
@@ -14,9 +13,8 @@ fn jsonschema_import_parse_int64_decimal(
   s : String,
   what : String,
 ) -> Int64 raise DecodeError {
-  @strconv.parse_int64(s[:]) catch {
-    @strconv.StrConvError(err) =>
-      raise DecodeError("jsonschema_import: invalid " + what + ": " + err)
+  @string.parse_int64(s[:]) catch {
+    err => raise DecodeError("jsonschema_import: invalid " + what + ": \{err}")
   }
 }
 
@@ -25,9 +23,8 @@ fn jsonschema_import_parse_int_decimal(
   s : String,
   what : String,
 ) -> Int raise DecodeError {
-  @strconv.parse_int(s[:]) catch {
-    @strconv.StrConvError(err) =>
-      raise DecodeError("jsonschema_import: invalid " + what + ": " + err)
+  @string.parse_int(s[:]) catch {
+    err => raise DecodeError("jsonschema_import: invalid " + what + ": \{err}")
   }
 }
 

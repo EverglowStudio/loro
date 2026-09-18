@@ -7,7 +7,7 @@ pub enum ContainerType {
   Tree
   Counter
   Unknown(UInt)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 // NOTE: MoonBit makes enum constructors read-only across packages. Expose explicit
 // constructor functions for blackbox tests and future callers.
@@ -61,7 +61,7 @@ pub fn container_type_to_u8(t : ContainerType) -> Byte {
 }
 
 ///|
-pub fn container_type_from_u8(b : Byte) -> ContainerType {
+pub fn container_type_from_u8(b : Byte) -> ContainerType raise DecodeError {
   match b.to_uint() {
     0 => ContainerType::Map
     1 => ContainerType::List
@@ -69,6 +69,7 @@ pub fn container_type_from_u8(b : Byte) -> ContainerType {
     3 => ContainerType::Tree
     4 => ContainerType::MovableList
     5 => ContainerType::Counter
+    6 => raise DecodeError("unsupported Graph container (type 6)")
     x => ContainerType::Unknown(x)
   }
 }
@@ -89,7 +90,9 @@ pub fn container_type_to_historical_u8(t : ContainerType) -> Byte {
 }
 
 ///|
-pub fn container_type_from_historical_u8(b : Byte) -> ContainerType {
+pub fn container_type_from_historical_u8(
+  b : Byte,
+) -> ContainerType raise DecodeError {
   match b.to_uint() {
     0 => ContainerType::Text
     1 => ContainerType::Map
@@ -97,6 +100,7 @@ pub fn container_type_from_historical_u8(b : Byte) -> ContainerType {
     3 => ContainerType::MovableList
     4 => ContainerType::Tree
     5 => ContainerType::Counter
+    6 => raise DecodeError("unsupported Graph container (type 6)")
     x => ContainerType::Unknown(x)
   }
 }

@@ -36,7 +36,7 @@ pub fn parse_container_wrapper(
   let r = BytesReader::from_view(bytes)
   let kind = container_type_from_u8(r.read_u8())
   let depth = r.read_uleb128_u64()
-  let (parent, rest) = try! postcard_decode_option_container_id(
+  let (parent, rest) = postcard_decode_option_container_id(
     bytes[bytes.length() - r.remaining():],
   )
   { kind, depth, parent, payload: rest }

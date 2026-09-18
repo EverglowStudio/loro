@@ -13,6 +13,8 @@ pub fn transcode_container_state_snapshot(
       transcode_movable_list_state_snapshot(payload, validate)
     ContainerType::Counter =>
       transcode_counter_state_snapshot(payload, validate)
+    ContainerType::Unknown(6) =>
+      raise DecodeError("unsupported Graph container (type 6)")
     ContainerType::Unknown(_) => payload.to_bytes()
   }
 }

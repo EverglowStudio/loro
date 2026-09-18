@@ -3,7 +3,7 @@ use super::*;
 use loro_internal::container_tree::{err, Event, Sink};
 use std::collections::HashMap;
 #[wasm_bindgen(inline_js = "
-const kinds = ['Map', 'List', 'MovableList', 'Text', 'Tree', 'Counter'];
+const kinds = ['Map', 'List', 'MovableList', 'Text', 'Tree', 'Counter', 'Graph'];
 export function stateOptions(options, document) {
   if (typeof options !== 'object' || options === null || Array.isArray(options)) throw new Error('Invalid toContainerTree options');
   for (const key of Object.keys(options)) {
@@ -103,7 +103,7 @@ impl JsSink {
             }),
             Event::End => {
                 let f = self.stack.pop().ok_or_else(|| err("Missing state frame"))?;
-                let v = if f.wrapper == 16 {
+                let v = if f.wrapper == u8::MAX {
                     stateValue(f.v)
                 } else if f.wrapper != 0 {
                     stateContainer(f.wrapper - 10, &f.cid, f.v)
@@ -132,6 +132,7 @@ impl Sink for FixedSink {
             ContainerType::Text => 3,
             ContainerType::Tree => 4,
             ContainerType::Counter => 5,
+            ContainerType::Graph => 6,
             _ => return Err(err("Unsupported container type")),
         };
         let cid = match id {
@@ -163,7 +164,7 @@ impl Sink for FixedSink {
     }
     fn value_start(&mut self) -> LoroResult<()> {
         self.0.stack.push(Frame {
-            wrapper: 16,
+            wrapper: u8::MAX,
             cid: JsValue::NULL,
             v: JsValue::NULL,
             array: false,
@@ -383,6 +384,17 @@ impl LoroCounter {
     }
 }
 #[wasm_bindgen]
+impl LoroGraph {
+    /// Read this attached graph and its metadata without committing pending edits.
+    #[wasm_bindgen(js_name = toContainerTree, skip_typescript)]
+    pub fn to_container_tree(
+        &self,
+        opts: Option<JsContainerTreeOptions>,
+    ) -> JsResult<JsContainerNode> {
+        container_tree(&self.handler, opts.map(Into::into))
+    }
+}
+#[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(typescript_type = "ContainerTreeOptions")]
     pub type JsContainerTreeOptions;
@@ -413,7 +425,8 @@ export type ContainerNode<T extends ContainerTreeTextFormat = ContainerTreeTextF
     | { type: "MovableList"; cid: ContainerID; value: ContainerTreeNode<T>[] }
     | { type: "Text"; cid: ContainerID; value: T extends "delta" ? Delta<string>[] : string }
     | { type: "Tree"; cid: ContainerID; value: TreeNodeSnapshot<T>[] }
-    | { type: "Counter"; cid: ContainerID; value: number };
+    | { type: "Counter"; cid: ContainerID; value: number }
+    | { type: "Graph"; cid: ContainerID; value: GraphValue<Extract<ContainerNode<T>, {type:"Map"}>> };
 export interface TreeNodeSnapshot<T extends ContainerTreeTextFormat = ContainerTreeTextFormat> {
     id: TreeID; parent: TreeID | null; index: number; fractional_index: string;
     meta: Extract<ContainerNode<T>, {type:"Map"}>;
@@ -462,5 +475,9 @@ interface LoroTree {
 interface LoroCounter {
     /** Read this attached container and descendants; text format applies recursively. Throws if detached. */
     toContainerTree<A extends [options?: ContainerTreeOptions]>(...args: A): Extract<ContainerNode<ContainerTreeText<A[0]>>, {type:"Counter"}>;
+}
+interface LoroGraph {
+    /** Flat topology with recursively resolved metadata; never follows graph edges. Throws if detached. */
+    toContainerTree<A extends [options?: ContainerTreeOptions]>(...args: A): Extract<ContainerNode<ContainerTreeText<A[0]>>, {type:"Graph"}>;
 }
 "#;

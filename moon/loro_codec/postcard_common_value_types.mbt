@@ -9,7 +9,7 @@ pub enum CommonValue {
   Map(Array[(String, CommonValue)])
   Container(ContainerID)
   Binary(Bytes)
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 // NOTE: MoonBit makes enum constructors read-only across packages. Expose explicit
 // constructor functions for blackbox tests and future callers.

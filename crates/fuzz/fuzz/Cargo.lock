@@ -341,7 +341,7 @@ dependencies = [
  "enum_dispatch",
  "itertools 0.12.1",
  "loro 0.16.12",
- "loro 1.13.7",
+ "loro 1.16.0",
  "loro 1.8.1",
  "num_cpus",
  "pretty_assertions",
@@ -359,7 +359,7 @@ version = "0.0.0"
 dependencies = [
  "fuzz",
  "libfuzzer-sys",
- "loro 1.13.7",
+ "loro 1.16.0",
 ]
 
 [[package]]
@@ -393,6 +393,18 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "generic-btree"
+version = "0.10.7"
+dependencies = [
+ "arref",
+ "heapless 0.9.2",
+ "itertools 0.11.0",
+ "loro-thunderdome",
+ "proc-macro2",
+ "rustc-hash",
 ]
 
 [[package]]
@@ -643,7 +655,7 @@ version = "0.16.12"
 source = "git+https://github.com/loro-dev/loro.git?tag=loro-crdt%401.0.0-alpha.4#9bfe97bce4912c6dc8439817497d18423a0e8cb7"
 dependencies = [
  "enum-as-inner 0.6.0",
- "generic-btree",
+ "generic-btree 0.10.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "loro-common 0.16.12",
  "loro-delta 0.16.12",
  "loro-internal 0.16.12",
@@ -657,7 +669,7 @@ version = "1.8.1"
 source = "git+https://github.com/loro-dev/loro.git?rev=c897c346d9fd46dccf44de7ef4e72799fa9c9769#c897c346d9fd46dccf44de7ef4e72799fa9c9769"
 dependencies = [
  "enum-as-inner 0.6.0",
- "generic-btree",
+ "generic-btree 0.10.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "loro-common 1.8.1",
  "loro-delta 1.6.0",
  "loro-internal 1.8.1",
@@ -668,14 +680,14 @@ dependencies = [
 
 [[package]]
 name = "loro"
-version = "1.13.7"
+version = "1.16.0"
 dependencies = [
  "enum-as-inner 0.6.0",
- "generic-btree",
- "loro-common 1.13.1",
+ "generic-btree 0.10.7",
+ "loro-common 1.16.0",
  "loro-delta 1.13.0",
- "loro-internal 1.13.7",
- "loro-kv-store 1.13.7",
+ "loro-internal 1.16.0",
+ "loro-kv-store 1.16.0",
  "rustc-hash",
  "tracing",
 ]
@@ -717,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "loro-common"
-version = "1.13.1"
+version = "1.16.0"
 dependencies = [
  "arbitrary",
  "enum-as-inner 0.6.0",
@@ -739,7 +751,7 @@ source = "git+https://github.com/loro-dev/loro.git?tag=loro-crdt%401.0.0-alpha.4
 dependencies = [
  "arrayvec",
  "enum-as-inner 0.5.1",
- "generic-btree",
+ "generic-btree 0.10.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "heapless 0.8.0",
  "tracing",
 ]
@@ -751,7 +763,7 @@ source = "git+https://github.com/loro-dev/loro.git?rev=c897c346d9fd46dccf44de7ef
 dependencies = [
  "arrayvec",
  "enum-as-inner 0.5.1",
- "generic-btree",
+ "generic-btree 0.10.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "heapless 0.8.0",
 ]
 
@@ -761,7 +773,7 @@ version = "1.13.0"
 dependencies = [
  "arrayvec",
  "enum-as-inner 0.5.1",
- "generic-btree",
+ "generic-btree 0.10.7",
  "heapless 0.8.0",
 ]
 
@@ -778,7 +790,7 @@ dependencies = [
  "enum-as-inner 0.6.0",
  "enum_dispatch",
  "fxhash",
- "generic-btree",
+ "generic-btree 0.10.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "getrandom",
  "im",
  "itertools 0.12.1",
@@ -818,7 +830,7 @@ dependencies = [
  "ensure-cov",
  "enum-as-inner 0.6.0",
  "enum_dispatch",
- "generic-btree",
+ "generic-btree 0.10.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "getrandom",
  "im",
  "itertools 0.12.1",
@@ -852,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "loro-internal"
-version = "1.13.7"
+version = "1.16.0"
 dependencies = [
  "append-only-bytes",
  "arref",
@@ -861,15 +873,15 @@ dependencies = [
  "ensure-cov",
  "enum-as-inner 0.6.0",
  "enum_dispatch",
- "generic-btree",
+ "generic-btree 0.10.7",
  "getrandom",
  "im",
  "itertools 0.12.1",
  "leb128",
  "loom",
- "loro-common 1.13.1",
+ "loro-common 1.16.0",
  "loro-delta 1.13.0",
- "loro-kv-store 1.13.7",
+ "loro-kv-store 1.16.0",
  "loro-rle 1.6.0",
  "loro_fractional_index 1.13.0",
  "md5",
@@ -929,11 +941,11 @@ dependencies = [
 
 [[package]]
 name = "loro-kv-store"
-version = "1.13.7"
+version = "1.16.0"
 dependencies = [
  "bytes",
  "ensure-cov",
- "loro-common 1.13.1",
+ "loro-common 1.16.0",
  "lz4_flex",
  "once_cell",
  "quick_cache",

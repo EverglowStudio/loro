@@ -92,6 +92,7 @@ for (const ContainerClass of [
   LoroTree,
   LoroMovableList,
   LoroCounter,
+  LoroGraph,
 ]) {
   __loroCacheContainerIdGetter(ContainerClass);
   __loroCacheKindMethod(ContainerClass);

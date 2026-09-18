@@ -1,3 +1,4 @@
+import { LoroUnsupportedGraphError } from "../codec/errors";
 import {
   ContainerType as CodecContainerType,
   type ContainerId as CodecContainerId,
@@ -105,6 +106,7 @@ export function formatContainerId(id: CodecContainerId): ContainerID {
 }
 
 export function parseContainerId(id: string): CodecContainerId {
+  assertSupportedContainerId(id);
   if (!id.startsWith("cid:")) {
     throw new TypeError(`invalid container id: ${id}`);
   }
@@ -120,6 +122,12 @@ export function parseContainerId(id: string): CodecContainerId {
   }
   const operationId = parseTreeId(body);
   return { kind: "normal", ...operationId, containerType };
+}
+
+export function assertSupportedContainerId(id: string): void {
+  if (id.startsWith("cid:") && id.lastIndexOf(":") > 4 && id.endsWith(":Graph")) {
+    throw new LoroUnsupportedGraphError();
+  }
 }
 
 export function newContainerID(id: OpId, type: ContainerType): ContainerID {

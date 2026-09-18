@@ -591,6 +591,7 @@ export function decodeContainerStateSnapshot(
   containerType: ContainerTypeValue,
   bytes: Uint8Array,
 ): ContainerStateSnapshot {
+  if (typeof containerType !== "string") containerTypeFromRawByte(containerType.value);
   switch (containerType) {
     case ContainerType.Map:
       return decodeMapStateSnapshot(bytes);

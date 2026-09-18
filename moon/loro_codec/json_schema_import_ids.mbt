@@ -9,6 +9,7 @@ fn jsonschema_import_container_type_from_string(
     "Tree" => ContainerType::Tree
     "MovableList" => ContainerType::MovableList
     "Counter" => ContainerType::Counter
+    "Graph" => raise DecodeError("unsupported Graph container (type 6)")
     _ => raise DecodeError("jsonschema_import: unknown container type: " + s)
   }
 }
@@ -99,6 +100,9 @@ fn jsonschema_import_parse_container_id(
 ) -> ContainerID raise DecodeError {
   if !s.has_prefix("cid:") {
     raise DecodeError("jsonschema_import: invalid container id: " + s)
+  }
+  if s.has_suffix(":Graph") {
+    raise DecodeError("unsupported Graph container (type 6)")
   }
   if s.has_prefix("cid:root-") {
     // cid:root-${name}:${ContainerType}

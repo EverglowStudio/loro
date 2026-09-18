@@ -104,3 +104,9 @@ name = "mergeable"
 path = "fuzz_targets/mergeable.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "graph"
+path = "fuzz_targets/graph.rs"
+test = false
+doc = false

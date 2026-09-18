@@ -48,7 +48,7 @@ can:
 
 If yes, add the JS method name to the relevant installed `decorateMethods(...)`
 allowlist near the bottom of `index.ts`. Today those wrappers cover
-`LoroDoc.prototype`, `EphemeralStoreWasm.prototype`, and `UndoManager.prototype`;
+`LoroDoc.prototype`, `LoroGraph.prototype`, `EphemeralStoreWasm.prototype`, and `UndoManager.prototype`;
 add another prototype only when the wrapper is wired there. Pure read/query APIs
 should not be decorated.
 

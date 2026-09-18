@@ -35,6 +35,7 @@ fn read_loro_value(r : BytesReader, depth : Int) -> LoroValue raise DecodeError 
     }
     9 => {
       let ct = r.read_u8()
+      let _ = container_type_from_u8(ct)
       LoroValue::ContainerType(ct)
     }
     _ => raise DecodeError("value: invalid loro_value kind")

@@ -31,10 +31,10 @@ fn jsonschema_import_parse_counter_op_content(
       let v = match repr {
         None => n
         Some(s) =>
-          @strconv.parse_double(s[:]) catch {
-            @strconv.StrConvError(err) =>
+          @string.parse_double(s[:]) catch {
+            err =>
               raise DecodeError(
-                "jsonschema_import: invalid op.content.value f64: " + err,
+                "jsonschema_import: invalid op.content.value f64: \{err}",
               )
           }
       }

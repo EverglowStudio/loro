@@ -84,6 +84,19 @@ container IDs, frontiers, version vectors, and primitive byte readers/writers.
 
 ## Compatibility status
 
+Native LoroGraph is not implemented by this runtime or its semantic codec. Graph
+container tags (raw/historical type 6), `:Graph` JSON container IDs and child
+references fail with `LoroUnsupportedGraphError` (`code: "UNSUPPORTED_GRAPH"`).
+Imports check current state, shallow roots and deferred history before accepting
+Graph data. Serialized diffs and JSON update redaction also reject Graph references.
+Other unknown types retain their existing handling; ordinary text and binary data
+are not Graph declarations.
+
+Envelope, encoded-block and SSTable framing APIs return opaque bytes. They do not
+validate container support; use the semantic readers or `LoroDoc.import()` for that
+boundary. This rejection policy does not implement or validate Graph operation
+payloads, and does not promise Graph round-trip forwarding.
+
 The following paths are checked against the Rust implementation:
 
 - Current FastUpdates (mode 4) import, export, decode, and re-encode.
@@ -129,6 +142,17 @@ pnpm lint
 pnpm build
 pnpm fixtures:rewrite
 ```
+
+After the native `graph_fixture` example has produced its files, check Graph
+rejection without rebuilding Rust:
+
+```sh
+bun --no-install scripts/check-graph-fixtures.ts /path/to/graph-fixtures
+```
+
+The script requires updates, full/shallow/state-only snapshots and JSON updates.
+It fails on missing files or a different error, checks that rejected imports leave
+committed local data unchanged, and prints SHA-256 hashes for the tested inputs.
 
 From the repository root, the Rust-side compatibility suite is:
 

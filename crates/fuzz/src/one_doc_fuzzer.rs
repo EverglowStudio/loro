@@ -836,7 +836,8 @@ impl OneDocFuzzer {
                         let counter = self.doc.get_counter("counter");
                         let _ = counter.get();
                     }
-                    ContainerType::Unknown(_) => {}
+                    ContainerType::Graph => panic!("Graph requires the dedicated graph_model causal-history driver; this legacy actor driver has no Graph target"),
+            ContainerType::Unknown(_) => {}
                 }
             }
             Action::ExportShallow { site } => {

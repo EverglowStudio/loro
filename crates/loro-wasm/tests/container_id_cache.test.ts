@@ -30,6 +30,7 @@ describe("container id cache", () => {
       doc.getTree("tree"),
       doc.getMovableList("movable-list"),
       doc.getCounter("counter"),
+      doc.getGraph("graph"),
     ];
 
     const { result: ids, decoderCalls } = countTextDecodes(() =>
@@ -140,6 +141,7 @@ describe("container kind cache", () => {
       doc.getTree("tree"),
       doc.getMovableList("movable-list"),
       doc.getCounter("counter"),
+      doc.getGraph("graph"),
     ];
 
     const { result: kinds, decoderCalls } = countTextDecodes(() =>

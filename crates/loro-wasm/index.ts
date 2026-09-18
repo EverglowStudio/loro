@@ -9,6 +9,7 @@ import {
   ContainerType,
   LoroCounter,
   LoroDoc,
+  LoroGraph,
   LoroList,
   LoroMap,
   LoroMovableList,
@@ -37,6 +38,7 @@ const CONTAINER_TYPES = [
   "Tree",
   "MovableList",
   "Counter",
+  "Graph",
 ];
 
 export function isContainerId(s: string): s is ContainerID {
@@ -102,7 +104,9 @@ export function getType<T>(
         ? "List"
         : T extends LoroCounter
           ? "Counter"
-          : "Json" {
+          : T extends LoroGraph
+            ? "Graph"
+            : "Json" {
   if (isContainer(value)) {
     return value.kind() as unknown as any;
   }
@@ -525,3 +529,13 @@ decorateMethods(EphemeralStoreWasm.prototype, [
 ]);
 
 decorateMethods(UndoManager.prototype, ["undo", "redo"]);
+
+decorateMethods(LoroGraph.prototype, [
+  "createNode",
+  "createEdge",
+  "deleteNode",
+  "deleteEdge",
+  "restoreNode",
+  "restoreEdge",
+  "applyRepair",
+]);

@@ -175,24 +175,18 @@ pub fn transcode_document(
   match doc.mode() {
     3 => {
       let parsed = parse_fast_snapshot_body(doc.body_view())
-      let oplog = if validate {
-        transcode_oplog_kv_store(parsed.oplog_bytes_view().to_bytes(), true)
-      } else {
-        parsed.oplog_bytes_view().to_bytes()
-      }
-      let state = if validate {
-        transcode_state_kv_store(parsed.state_bytes_view().to_bytes(), true)
-      } else {
-        parsed.state_bytes_view().to_bytes()
-      }
-      let shallow_root_state = if validate {
-        transcode_state_kv_store(
-          parsed.shallow_root_state_bytes_view().to_bytes(),
-          true,
-        )
-      } else {
-        parsed.shallow_root_state_bytes_view().to_bytes()
-      }
+      let oplog = transcode_oplog_kv_store(
+        parsed.oplog_bytes_view().to_bytes(),
+        validate,
+      )
+      let state = transcode_state_kv_store(
+        parsed.state_bytes_view().to_bytes(),
+        validate,
+      )
+      let shallow_root_state = transcode_state_kv_store(
+        parsed.shallow_root_state_bytes_view().to_bytes(),
+        validate,
+      )
       let body = encode_fast_snapshot_body(oplog, state, shallow_root_state)
       encode_document(3, body)
     }

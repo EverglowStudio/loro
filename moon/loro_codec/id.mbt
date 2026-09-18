@@ -2,7 +2,7 @@
 pub struct ID {
   peer : UInt64
   counter : Int
-} derive(Eq, Show)
+} derive(Eq, Show, Debug)
 
 ///|
 pub fn ID::new(peer : UInt64, counter : Int) -> ID {

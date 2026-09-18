@@ -74,7 +74,8 @@ describe("wasm panic regressions", () => {
   it("accessing an unknown container throws a readable error instead of trapping", () => {
     // Craft a document containing an unknown container (as produced by a
     // future Loro version) via JSON updates: take a real export and rewrite
-    // the child container id to an unknown container type.
+    // the child container id to an unknown container type. Tag 6 is now Graph;
+    // tag 7 remains unknown and must preserve the readable-error contract.
     const doc = new LoroDoc();
     doc.setPeerId(1n);
     const map = doc.getMap("map");
@@ -83,7 +84,7 @@ describe("wasm panic regressions", () => {
     const textCid = "cid:0@0:Text";
     expect(JSON.stringify(json)).toContain(textCid);
     const patched = JSON.parse(
-      JSON.stringify(json).split(textCid).join("cid:0@0:Unknown(6)"),
+      JSON.stringify(json).split(textCid).join("cid:0@0:Unknown(7)"),
     );
 
     const doc2 = new LoroDoc();
@@ -105,7 +106,7 @@ describe("wasm panic regressions", () => {
     const json = doc.exportJsonUpdates();
     const textCid = "cid:0@0:Text";
     const patched = JSON.parse(
-      JSON.stringify(json).split(textCid).join("cid:0@0:Unknown(6)"),
+      JSON.stringify(json).split(textCid).join("cid:0@0:Unknown(7)"),
     );
     const doc2 = new LoroDoc();
     doc2.importJsonUpdates(patched);

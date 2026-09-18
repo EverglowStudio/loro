@@ -27,6 +27,9 @@ fn take_postcard_vec_marks(
   let n = n_u64.to_int()
   let out : Array[EncodedMark] = []
   for _i in 0..<n {
+    if r.read_varint_u64() != 3UL {
+      raise DecodeError("richtext: invalid EncodedMark field count")
+    }
     let key_idx = r.read_varint_u64()
     let (value, rest) = postcard_take_common_value(r.remaining_view())
     r.skip(r.remaining() - rest.length())
@@ -42,6 +45,7 @@ fn encode_postcard_vec_marks(marks : Array[EncodedMark]) -> Bytes {
   w.write_varint_u64(marks.length().to_uint64())
   for m in marks {
     let (key_idx, value, info) = m
+    w.write_varint_u64(3UL)
     w.write_varint_u64(key_idx)
     w.write_bytes(postcard_encode_common_value(value))
     w.write_u8(info)

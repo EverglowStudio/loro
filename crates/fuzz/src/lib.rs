@@ -5,6 +5,7 @@ pub mod actions;
 pub mod actor;
 pub mod container;
 pub mod crdt_fuzzer;
+pub mod graph;
 pub mod local_events;
 mod macros;
 pub mod one_doc_fuzzer;

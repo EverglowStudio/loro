@@ -32,6 +32,7 @@ impl Value {
             ContainerType::Counter => {
                 Value::Container(ContainerTracker::Counter(CounterTracker::empty(id)))
             }
+            ContainerType::Graph => panic!("Graph requires the dedicated graph_model causal-history driver; this legacy actor driver has no Graph target"),
             ContainerType::Unknown(_) => unreachable!(),
         }
     }
@@ -473,7 +474,8 @@ impl ContainerTracker {
                 ContainerType::Counter => {
                     value.as_counter_mut().unwrap().apply_diff(diff);
                 }
-                ContainerType::Unknown(_) => unreachable!(),
+                ContainerType::Graph => panic!("Graph requires the dedicated graph_model causal-history driver; this legacy actor driver has no Graph target"),
+            ContainerType::Unknown(_) => unreachable!(),
             }
         }
     }
