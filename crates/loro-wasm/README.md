@@ -178,6 +178,49 @@ right.import(l);
 // Both edges remain visible: concurrent creation of a cycle is valid.
 ```
 
+Outgoing relations have an independent manual order for each source node:
+
+```ts
+const first = graph.createEdgeAt(a, b, { type: "start" });
+const last = graph.createEdge(a, b); // Appends; parallel edges remain separate.
+const result = graph.reorderEdge(last, { type: "before", edge: first });
+console.log(result.changed, result.auxiliaryUpdates);
+console.log(graph.orderedOutEdges(a)); // { edgeId, target, position }[]
+console.log(graph.outEdgeAt(a, 0), graph.indexOfOutEdge(last));
+left.commit(); // The methods do not commit implicitly.
+```
+
+Targets are `start`, `end`, `before`, or `after`. The latter two refer to a
+visible edge in the same Graph and source at call time. A reorder preserves
+identity, endpoints, and metadata. Self anchors and already-satisfied positions
+return `changed: false` without allocating operation IDs. Moving a relation to
+a shared child under one parent does not reorder its relations under another.
+
+Each edge's position is an independent LWW register ordered by the operation's
+Lamport/peer. Visible edges sort by position bytes and immutable edge ID, not
+the last writer. Same-key insertion explicitly rewrites the necessary visible
+equal-key suffix; `auxiliaryUpdates` counts those writes. They compete normally
+with another replica's direct reorder, and can win or lose individually. This
+does not provide range moves or a single winner for the whole batch. Optional
+`configureOrderJitter(0..255)` affects only local allocation and does not remove
+the need to handle collisions.
+
+`position` is a validated hexadecimal key of 1–4096 bytes. The key grows as
+needed; exhausted capacity returns `PositionTooLong` before any local write.
+Order errors have a stable `code`: `MissingNode`, `EdgeNotVisible`,
+`AnchorNotVisible`, `CrossSource`, `InvalidPosition`, `PositionTooLong`, or
+`Engine`. Invalid JS arguments use `InvalidTarget`, `InvalidId`, `InvalidIndex`,
+or `InvalidJitter`. Numeric strings, fractions, and out-of-range integers are
+rejected for indices/jitter instead of being truncated.
+
+Diagnostic edge records expose `position` and `lastOrder: { id, lamport }`;
+`id` stays a full-width string. Graph diffs include per-edge `orders` with
+source and before/after values. Pure order events preserve existing metadata.
+Hidden edges retain their order history and use the retained winning position
+when restored. Queries neither generate operations nor repair collisions.
+Snapshots persist order histories but not the local jitter policy. The earlier
+development Graph format without positions has no migration or dual reader.
+
 `nodes`, `edges`, `getNode`, `getEdge`, adjacency queries, and counts describe the
 visible graph. `nodeRecord`, `edgeRecord`, `nodeRecords`, and `edgeRecords` also
 expose deleted records and active deletion tags. An edge can be alive but hidden

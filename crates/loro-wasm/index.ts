@@ -533,6 +533,8 @@ decorateMethods(UndoManager.prototype, ["undo", "redo"]);
 decorateMethods(LoroGraph.prototype, [
   "createNode",
   "createEdge",
+  "createEdgeAt",
+  "reorderEdge",
   "deleteNode",
   "deleteEdge",
   "restoreNode",

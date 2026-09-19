@@ -12,6 +12,16 @@ extern "C" {
     pub type JsGraphNodeIds;
     #[wasm_bindgen(typescript_type = "GraphEdgeId[]")]
     pub type JsGraphEdgeIds;
+    #[wasm_bindgen(typescript_type = "GraphOrderTarget")]
+    pub type JsGraphOrderTarget;
+    #[wasm_bindgen(typescript_type = "GraphReorderOutcome")]
+    pub type JsGraphReorderOutcome;
+    #[wasm_bindgen(typescript_type = "OrderedGraphEdge[]")]
+    pub type JsOrderedGraphEdges;
+    #[wasm_bindgen(typescript_type = "OrderedGraphEdge | undefined")]
+    pub type JsOrderedGraphEdgeOrUndefined;
+    #[wasm_bindgen(typescript_type = "number")]
+    pub type JsGraphOrderNumber;
     #[wasm_bindgen(typescript_type = "GraphNodeRecord | undefined")]
     pub type JsGraphNodeRecordOrUndefined;
     #[wasm_bindgen(typescript_type = "GraphEdgeRecord | undefined")]
@@ -46,6 +56,40 @@ declare const graphEdgeIdBrand: unique symbol;
 export type GraphNodeId = `${number}@${PeerID}` & { readonly [graphNodeIdBrand]: true };
 export type GraphEdgeId = `${number}@${PeerID}` & { readonly [graphEdgeIdBrand]: true };
 
+/** Native canonical fractional-key hex, at most 4096 bytes and ending in 80.
+ * Read-only diagnostic data; use ordering methods to allocate keys in Rust.
+ */
+export type GraphPosition = string;
+/** Anchors select a gap at call time, not an enduring relationship to the anchor. */
+export type GraphOrderTarget =
+    | { type: "start" }
+    | { type: "end" }
+    | { type: "before"; edge: GraphEdgeId }
+    | { type: "after"; edge: GraphEdgeId };
+export type GraphReorderOutcome = {
+    changed: boolean;
+    /** Collision-opening writes to other edges; these compete under ordinary LWW. */
+    auxiliaryUpdates: number;
+};
+export type OrderedGraphEdge = {
+    edgeId: GraphEdgeId;
+    target: GraphNodeId;
+    position: GraphPosition;
+};
+/** Lossless operation identity and logical time; peer IDs stay inside the string. */
+export type GraphOrderWriter = { id: JsonOpID; lamport: number };
+export type GraphOrderValue = { position: GraphPosition; lastOrder: GraphOrderWriter };
+export type GraphOrderDelta = {
+    source: GraphNodeId;
+    before: GraphOrderValue | null;
+    after: GraphOrderValue | null;
+};
+export type GraphOrderErrorCode = "MissingNode" | "EdgeNotVisible" | "AnchorNotVisible" |
+    "CrossSource" | "InvalidPosition" | "PositionTooLong" | "Engine" |
+    "InvalidTarget" | "InvalidId" | "InvalidIndex" | "InvalidJitter";
+/** Ordering failures are Error instances with a stable code field. */
+export type GraphOrderError = Error & { code: GraphOrderErrorCode };
+
 export type GraphNodeRecord = {
     id: GraphNodeId;
     alive: boolean;
@@ -57,6 +101,8 @@ export type GraphEdgeRecord = {
     id: GraphEdgeId;
     source: GraphNodeId;
     target: GraphNodeId;
+    position: GraphPosition;
+    lastOrder: GraphOrderWriter;
     alive: boolean;
     /** False when deleted or when either endpoint is not alive. */
     visible: boolean;
@@ -65,11 +111,12 @@ export type GraphEdgeRecord = {
 /** Flat topology. Metadata can contain nested containers; graph edges remain IDs. */
 export type GraphValue<M> = {
     nodes: { id: GraphNodeId; meta: M }[];
-    edges: { id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId; meta: M }[];
+    edges: { id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId; position: GraphPosition; meta: M }[];
 };
 export type GraphOp =
     | { type: "create_node"; id: GraphNodeId }
-    | { type: "create_edge"; id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId }
+    | { type: "create_edge"; id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId; position: GraphPosition }
+    | { type: "set_edge_order"; id: GraphEdgeId; position: GraphPosition }
     | { type: "delete_node"; id: GraphNodeId }
     | { type: "delete_edge"; id: GraphEdgeId }
     | { type: "restore_node"; id: GraphNodeId; deletes: JsonOpID[] }
@@ -77,7 +124,8 @@ export type GraphOp =
 /** Graph operations in exportJsonUpdates/importJsonUpdates use the native enum shape. */
 export type GraphJsonOp =
     | { create_node: { id: GraphNodeId } }
-    | { create_edge: { id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId } }
+    | { create_edge: { id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId; position: GraphPosition } }
+    | { set_edge_order: { id: GraphEdgeId; position: GraphPosition } }
     | { delete_node: { id: GraphNodeId } }
     | { delete_edge: { id: GraphEdgeId } }
     | { restore_node: { id: GraphNodeId; deletes: JsonOpID[] } }
@@ -85,11 +133,13 @@ export type GraphJsonOp =
 export type GraphDiff = {
     type: "graph";
     diff: {
-        ops: { id: JsonOpID; op: GraphOp; forward: boolean }[];
+        ops: { id: JsonOpID; lamport: number; op: GraphOp; forward: boolean }[];
         /** Null removes a creation record when checking out earlier history. */
         nodes: Record<GraphNodeId, GraphNodeRecord | null>;
         /** Includes derived visibility changes caused by endpoint delete/restore. */
         edges: Record<GraphEdgeId, GraphEdgeRecord | null>;
+        /** Net register changes retain source and both writers for selective undo. */
+        orders: Record<GraphEdgeId, GraphOrderDelta>;
     };
 };
 

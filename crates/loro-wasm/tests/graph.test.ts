@@ -220,6 +220,15 @@ describe("native graph", () => {
     });
     expect(doc.toContainerTree({ roots: ["graph"], text: "delta" }).graph)
       .toEqual(tree);
+    const position = graph.edgeRecord(edge)!.position;
+    expect(tree.value.edges[0]).toMatchObject({ id: edge, source: node, target: node, position });
+    expect(graph.toJSON()).toEqual({
+      nodes: [{ id: node, meta: { raw: { nested: [1, true] }, text: "hello" } }],
+      edges: [{ id: edge, source: node, target: node, position, meta: { text: "loop" } }],
+    });
+    expect(graph.getShallowValue().edges).toEqual([{
+      id: edge, source: node, target: node, position, meta: graph.edgeMeta(edge).id,
+    }]);
     expect(graph.toJSON().nodes[0].meta.text).toBe("hello");
     expect(graph.getShallowValue().nodes[0].meta).toBe(meta.id);
     expect(doc.getUncommittedOpsAsJson()).toEqual(pending);
@@ -265,6 +274,7 @@ describe("graph wire, history and events", () => {
         if ("source" in fields) {
           expect(fields.source).toMatch(`@${MAX_PEER}`);
           expect(fields.target).toMatch(`@${MAX_PEER}`);
+          expect(fields.position).toMatch(/^(?:[0-9a-fA-F]{2})*80$/);
         }
         if ("deletes" in fields) {
           expect(fields.deletes).toHaveLength(1);

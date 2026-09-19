@@ -4,6 +4,7 @@ use std::sync::Arc;
 use js_sys::{Array, Object, Reflect};
 use loro_common::{GraphEdgeId, GraphNodeId};
 use loro_internal::{
+    container::graph::{GraphOrderError, GraphOrderTarget},
     graph::{self, GraphRepairError, GraphScope, RepairPolicy, RepairReason},
     handler::{GraphHandler, Handler},
     HandlerTrait,
@@ -20,7 +21,7 @@ use crate::{
 mod convert;
 mod types;
 pub(crate) use convert::{diff_from_js, diff_to_js};
-use convert::{EdgeRecord, NodeRecord};
+use convert::{EdgeRecord, NodeRecord, OrderedEdge};
 use types::*;
 
 fn to_js<T: Serialize>(value: &T) -> JsResult<JsValue> {
@@ -66,6 +67,73 @@ fn node_arg(value: &JsGraphNodeId) -> JsResult<GraphNodeId> {
 
 fn edge_arg(value: &JsGraphEdgeId) -> JsResult<GraphEdgeId> {
     edge_id(&value.as_string().ok_or("Graph edge ID must be a string")?)
+}
+
+fn order_argument_error(code: &str, message: &str) -> JsValue {
+    let value: JsValue = JsError::new(message).into();
+    let _ = Reflect::set(&value, &"name".into(), &"GraphOrderError".into());
+    let _ = Reflect::set(&value, &"code".into(), &code.into());
+    value
+}
+
+fn order_error(error: GraphOrderError) -> JsValue {
+    let code = match &error {
+        GraphOrderError::MissingNode => "MissingNode",
+        GraphOrderError::EdgeNotVisible => "EdgeNotVisible",
+        GraphOrderError::AnchorNotVisible => "AnchorNotVisible",
+        GraphOrderError::CrossSource => "CrossSource",
+        GraphOrderError::InvalidPosition => "InvalidPosition",
+        GraphOrderError::PositionTooLong => "PositionTooLong",
+        GraphOrderError::Engine(_) => "Engine",
+    };
+    order_argument_error(code, &error.to_string())
+}
+
+fn order_node_arg(value: &JsGraphNodeId) -> JsResult<GraphNodeId> {
+    node_arg(value).map_err(|_| {
+        order_argument_error(
+            "InvalidId",
+            "Graph node ID must be a valid counter@peer string",
+        )
+    })
+}
+
+fn order_edge_arg(value: &JsGraphEdgeId) -> JsResult<GraphEdgeId> {
+    edge_arg(value).map_err(|_| {
+        order_argument_error(
+            "InvalidId",
+            "Graph edge ID must be a valid counter@peer string",
+        )
+    })
+}
+
+fn order_target(value: &JsGraphOrderTarget) -> JsResult<GraphOrderTarget> {
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+    enum Target {
+        Start {},
+        End {},
+        Before { edge: String },
+        After { edge: String },
+    }
+    let value: &JsValue = value.as_ref();
+    let target: Target = serde_wasm_bindgen::from_value(value.clone()).map_err(|error| {
+        order_argument_error(
+            "InvalidTarget",
+            &format!("Invalid Graph order target: {error}"),
+        )
+    })?;
+    let anchor = |value: &str| {
+        edge_id(value).map_err(|_| {
+            order_argument_error("InvalidId", "Graph anchor must be a valid edge ID string")
+        })
+    };
+    Ok(match target {
+        Target::Start {} => GraphOrderTarget::Start,
+        Target::End {} => GraphOrderTarget::End,
+        Target::Before { edge } => GraphOrderTarget::Before(anchor(&edge)?),
+        Target::After { edge } => GraphOrderTarget::After(anchor(&edge)?),
+    })
 }
 
 fn id_array<T: ToString>(ids: impl IntoIterator<Item = T>) -> JsValue {
@@ -154,7 +222,8 @@ impl LoroGraph {
         Ok(JsValue::from_str(&self.handler.create_node()?.to_string()).into())
     }
 
-    /// Allocate a distinct edge. Endpoints are immutable; parallel edges and cycles are allowed.
+    /// Append a distinct edge to the source's visible outgoing order.
+    /// Endpoints are immutable; parallel edges and cycles are allowed.
     #[wasm_bindgen(js_name = "createEdge")]
     pub fn create_edge(
         &self,
@@ -164,10 +233,78 @@ impl LoroGraph {
         Ok(JsValue::from_str(
             &self
                 .handler
-                .create_edge(node_arg(source)?, node_arg(target)?)?
+                .create_edge_at(
+                    order_node_arg(source)?,
+                    order_node_arg(target)?,
+                    GraphOrderTarget::End,
+                )
+                .map_err(order_error)?
                 .to_string(),
         )
         .into())
+    }
+
+    /// Create an edge at the current visible gap. Anchors must belong to this source.
+    /// Rust assigns concrete positions, including any collision-opening writes.
+    #[wasm_bindgen(js_name = "createEdgeAt")]
+    pub fn create_edge_at(
+        &self,
+        source: &JsGraphNodeId,
+        target: &JsGraphNodeId,
+        order: &JsGraphOrderTarget,
+    ) -> JsResult<JsGraphEdgeId> {
+        let id = self
+            .handler
+            .create_edge_at(
+                order_node_arg(source)?,
+                order_node_arg(target)?,
+                order_target(order)?,
+            )
+            .map_err(order_error)?;
+        Ok(JsValue::from_str(&id.to_string()).into())
+    }
+
+    /// Move one visible edge without changing its identity, endpoints or metadata.
+    /// No-ops allocate no operations. Collision-opening auxiliary writes compete
+    /// with concurrent user moves under the same native LWW rule.
+    #[wasm_bindgen(js_name = "reorderEdge")]
+    pub fn reorder_edge(
+        &self,
+        id: &JsGraphEdgeId,
+        target: &JsGraphOrderTarget,
+    ) -> JsResult<JsGraphReorderOutcome> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Outcome {
+            changed: bool,
+            auxiliary_updates: usize,
+        }
+        let result = self
+            .handler
+            .reorder_edge(order_edge_arg(id)?, order_target(target)?)
+            .map_err(order_error)?;
+        Ok(to_js(&Outcome {
+            changed: result.changed,
+            auxiliary_updates: result.auxiliary_updates,
+        })?
+        .into())
+    }
+
+    /// Configure local key-generation jitter (an integer from 0 to 255).
+    /// Zero disables randomness. Imported positions are never regenerated.
+    #[wasm_bindgen(js_name = "configureOrderJitter")]
+    pub fn configure_order_jitter(&self, jitter: &JsGraphOrderNumber) -> JsResult<()> {
+        let jitter = jitter.as_f64().ok_or_else(|| {
+            order_argument_error("InvalidJitter", "Graph order jitter must be a number")
+        })?;
+        if !jitter.is_finite() || !(0.0..=255.0).contains(&jitter) || jitter.fract() != 0.0 {
+            return Err(order_argument_error(
+                "InvalidJitter",
+                "Graph order jitter must be an integer from 0 to 255",
+            ));
+        }
+        self.handler.configure_order_jitter(jitter as u8);
+        Ok(())
     }
 
     /// Hide the node and its incident edges without deleting those edge records.
@@ -290,6 +427,50 @@ impl LoroGraph {
     #[wasm_bindgen(js_name = "outgoingEdges")]
     pub fn outgoing_edges(&self, id: &JsGraphNodeId) -> JsResult<JsGraphEdgeIds> {
         Ok(id_array(self.handler.outgoing_edges(node_arg(id)?)?).into())
+    }
+
+    /// Visible outgoing edges in native (position, immutable EdgeId) order.
+    /// Parallel edges remain separate items. Reads never commit or repair collisions.
+    #[wasm_bindgen(js_name = "orderedOutEdges")]
+    pub fn ordered_out_edges(&self, source: &JsGraphNodeId) -> JsResult<JsOrderedGraphEdges> {
+        let edges = self
+            .handler
+            .ordered_out_edges(order_node_arg(source)?)
+            .map_err(|error| order_error(GraphOrderError::Engine(error)))?;
+        Ok(to_js(&edges.iter().map(OrderedEdge::from).collect::<Vec<_>>())?.into())
+    }
+
+    /// Select a visible outgoing edge by its zero-based index, or undefined.
+    /// The index must be a nonnegative u32 integer; it is never coerced or truncated.
+    #[wasm_bindgen(js_name = "outEdgeAt")]
+    pub fn out_edge_at(
+        &self,
+        source: &JsGraphNodeId,
+        index: &JsGraphOrderNumber,
+    ) -> JsResult<JsOrderedGraphEdgeOrUndefined> {
+        let index = index.as_f64().ok_or_else(|| {
+            order_argument_error("InvalidIndex", "Graph order index must be a number")
+        })?;
+        if !index.is_finite() || index < 0.0 || index > u32::MAX as f64 || index.fract() != 0.0 {
+            return Err(order_argument_error(
+                "InvalidIndex",
+                "Graph order index must be a nonnegative u32 integer",
+            ));
+        }
+        Ok(match self
+            .handler
+            .out_edge_at(order_node_arg(source)?, index as usize)
+        {
+            Some(edge) => to_js(&OrderedEdge::from(&edge))?,
+            None => JsValue::UNDEFINED,
+        }
+        .into())
+    }
+
+    /// Return an edge's zero-based visible outgoing rank, or undefined when hidden/missing.
+    #[wasm_bindgen(js_name = "indexOfOutEdge")]
+    pub fn index_of_out_edge(&self, id: &JsGraphEdgeId) -> JsResult<Option<usize>> {
+        Ok(self.handler.index_of_out_edge(order_edge_arg(id)?))
     }
 
     /// Unique incoming neighbors, sorted by native ID order.
