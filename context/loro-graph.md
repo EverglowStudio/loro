@@ -46,6 +46,27 @@ by `(peer, counter)`. `nodes`/`edges` return visible IDs in that order.
 `predecessors`/`successors` deduplicate neighboring nodes. Object IDs are
 validated against the Graph that receives an operation.
 
+`ordered_out_edges(source)` is a separate source-scoped sequence of relations,
+including parallel edges. Creation appends by default; `create_edge_at` and
+`reorder_edge` evaluate Start/End/Before/After once under the transaction lock.
+No-op moves consume no operation IDs. Anchors must be visible in this Graph
+and share the source; endpoints are immutable. Queries do not commit or repair.
+
+Each edge retains position writes, including hidden and losing writes. The
+winner is maximal `(Lamport, peer)`; display order is `(GraphPosition bytes,
+immutable EdgeId(peer,counter))`. Never use the last writer as a display tie.
+`container/graph/order.rs` validates 1–4096 byte keys ending in `80`; it wraps
+the existing fractional-index generator and keeps Tree's format unchanged.
+Equal-key gaps cause explicit ordinary LWW writes to the necessary visible
+suffix. Concurrent direct moves can win against some of these writes. This
+is single-edge movement with auxiliary writes, not range movement.
+
+`state/graph_state/order_index.rs` reuses the existing generic B-tree's length
+caches and leaf handles for rank/select. Only visible edges occupy the index;
+restore rebuilds their entries using retained positions. The whole outgoing
+snapshot allocates O(d) output; rank/select use cached subtree lengths. A
+collision plan additionally costs its affected suffix and generated keys.
+
 `node_meta`/`edge_meta` return the associated normal Map at the creation ID.
 Metadata stays addressable on deleted records, and writing it does not restore
 the graph object. Graph topology is not encoded as Map properties. Deep values
@@ -72,7 +93,7 @@ or a ContainerID are not enough to identify a Graph. Hidden-record metadata
 remains addressable, but a visible-value mirror ignores its path while the
 corresponding row is absent.
 
-Visible record upserts in `Diff::Graph` rebuild the row's metadata slot.
+Lifecycle record upserts in `Diff::Graph` rebuild the row's metadata slot.
 [`DocState::diffs_to_event`](../crates/loro-internal/src/state.rs) supplies the
 full metadata subtree after event composition, replacing intermediate child
 diffs so nested Text/List contents are not inserted twice. The same file's
@@ -81,6 +102,9 @@ their nested containers. This covers local Restore and checkout bringing
 back a Graph removed from a parent Map, even without intervening metadata
 operations. The tradeoff is full subtree events for changed visible records;
 propagation follows container ownership, never user graph relationships.
+Pure order changes patch the position while retaining the row's existing
+metadata, and do not request a full metadata subtree. Edge value rows carry
+position; diagnostic records and order deltas also expose the selected writer.
 
 `DocState::start_recording_for_edit` is used by public `diff` and selective
 undo. In that mode, Graph lifecycle changes do not request full metadata:
@@ -108,6 +132,26 @@ and other Restores. Creation gets new object IDs, and `GraphHandler::apply_delta
 remaps node/edge references and their metadata ContainerIDs. This planning step
 is separate from checkout's exact forward/backward history application and
 does not change the wire format.
+
+Fresh edge identities can change a position's tie-break when a diff copies
+only part of a source's outgoing edges. The
+[`copy_order` planner](../crates/loro-internal/src/state/graph_state/local_diff/copy_order.rs)
+fixes the future visible sequence using net lifecycles and planned order edits,
+then allocates keys for copied prefixes and necessary mixed suffixes. Groups
+are identified by their original positions; the next group's copied prefix
+follows the preceding group's final allocated key. All allocations succeed
+before changing the edit plan. Existing order writes are replaced by actual
+destination identity, so auxiliary planning cannot emit duplicate writes.
+This preserves copy order without changing remote merge or identity ordering.
+
+Order edits use `GraphDiff::orders`, a per-edge net before/after position and
+writer, separately from exact historical `ops`. Composition retains earliest
+before and final after. Editable application emits fresh writes, so a previous
+Undo's compensation writer does not prevent a later Undo. Transform protects
+independent winning order writes; `DiffBatch::transform_for_undo` passes the
+entire selected ID spans, including groups split by independent remote Map
+dependencies. Peer equality alone cannot identify the group. Graph diff apply
+errors propagate through Undo rather than reporting false success.
 
 The import validator proves observation from the operation DAG. Merely finding
 a Delete in the receiving document does not prove the Restore observed it.

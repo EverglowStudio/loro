@@ -1,6 +1,6 @@
 # Native Graph encoding extension
 
-Verified against code 2026-09-19 in the `feat/lorograph` working tree.
+Verified against code 2026-09-19 in the `feat/lorograph-order` working tree.
 
 This document extends [the binary format reference](encoding.md) and
 [the container-state reference](encoding-container-states.md) for the native
@@ -122,11 +122,20 @@ The variant indexes and field order are:
 | Index | Rust variant | Fields, in encoded order |
 |---:|---|---|
 | 0 | `CreateNode` | node `id` |
-| 1 | `CreateEdge` | edge `id`, node `source`, node `target` |
+| 1 | `CreateEdge` | edge `id`, node `source`, node `target`, `Position` |
 | 2 | `DeleteNode` | node `id` |
 | 3 | `DeleteEdge` | edge `id` |
 | 4 | `RestoreNode` | node `id`, `DeleteTags` |
 | 5 | `RestoreEdge` | edge `id`, `DeleteTags` |
+| 6 | `SetEdgeOrder` | edge `id`, `Position` |
+
+`Position := pvar(usize byte_count) byte[byte_count]`. A Graph key has 1–4096
+bytes, ends in `80`, and compares lexicographically as unsigned bytes. JSON
+uses an even-length hexadecimal string, with uppercase canonical output.
+The Graph wrapper validates every decoded key before the fractional-index
+algorithm sees it. This is Graph's own key format, not a change to Tree's
+position codec. Local jitter appends a canonical terminator and checks the
+generated key against its strict bounds. There is no float representation.
 
 These are externally tagged serde variants. The snake-case variant names
 affect JSON, not postcard; binary bytes contain the index and fields. There
@@ -169,6 +178,26 @@ Sources: [`state/graph_state.rs`](../crates/loro-internal/src/state/graph_state.
 [`handler/graph.rs`](../crates/loro-internal/src/handler/graph.rs),
 `restore_node`, `restore_edge`, `apply_delta`.
 
+### 2.3 Order register and visible sequence
+
+CreateEdge initializes a per-edge position register. SetEdgeOrder competes
+only on that field: the greatest `(Lamport, peer)` operation wins, even when
+its position is smaller. Lamport and operation ID come from the enclosing
+change, not a second clock inside GraphOp. The visible outgoing index sorts
+by `(position bytes, immutable EdgeId(peer, counter))`. Last-writer identity
+is never the tie-breaker between distinct edges. Hidden edges retain all
+their order writes at the selected history boundary.
+
+Local collision opening emits concrete SetEdgeOrder writes for the necessary
+visible equal-key suffix in the same editing batch. These auxiliary writes
+have ordinary LWW priority against another replica's direct reorder. Import
+does not rerun anchors, allocation, jitter, or collision repair. No global
+batch winner or range-move semantics are implied.
+
+The development Graph format replaces the earlier payload without position
+or lifecycle clocks. There is no inferred position, migration or dual reader.
+Unrelated container formats and tags remain unchanged.
+
 ## 3. FastSnapshot state and shallow snapshots
 
 The Graph-specific bytes follow the usual ContainerWrapper header:
@@ -194,17 +223,26 @@ Records :=
     (ObjectOrOpID edge_id,
      ObjectOrOpID source,
      ObjectOrOpID target,
-     Life)[edge_count]
+     Life,
+     pvar(usize order_write_count),
+     (pvar(u32 lamport), pvar(u64 peer),
+      pvar(i32 counter), Position)[order_write_count])[edge_count]
 
 Life :=
+    pvar(u32 creation_lamport)
     pvar(usize delete_count)
-    ObjectOrOpID delete_id[delete_count]
+    (ObjectOrOpID delete_id, pvar(u32 delete_lamport))[delete_count]
     pvar(usize restore_count)
-    (ObjectOrOpID restore_id, DeleteTags)[restore_count]
+    (ObjectOrOpID restore_id, pvar(u32 restore_lamport), DeleteTags)[restore_count]
 ```
 
-`nodes`, `edges` and `restores` are BTreeMaps; `deletes` is a BTreeSet. The
-writer orders their entries by numeric `(peer, counter)`, not by textual ID.
+`nodes`, `edges`, `deletes` and `restores` are BTreeMaps. The
+writer orders these entries by numeric `(peer, counter)`, not by textual ID.
+The edge order-history map is ordered by `(Lamport, peer)` and includes its
+creation write. Counter completes the recorded operation identity. Snapshot
+decoding requires a matching creation writer, known endpoints and distinct
+valid operation identities; subsequent order writes have a greater Lamport
+than creation. Lifecycle clocks allow state-to-diff to preserve actual clocks.
 The Restore value vectors retain their recorded order. An empty `Records`
 payload is `00 00`.
 
@@ -212,8 +250,9 @@ The payload contains records for alive and deleted objects, all Delete
 identities and Restore identities at the encoded version, and each Restore's
 observed delete list. The cached removal reference counts (`Life::removed`)
 are skipped by serde. Container indexes, incoming/outgoing adjacency,
-visible sets and derived counts are also absent. Decoding validates records,
-rebuilds removal counts and adjacency, and derives visibility. No attribute
+visible sets, per-source order B-trees, jitter settings and derived counts are
+also absent. Decoding validates records, rebuilds removal counts, adjacency
+and visible order indexes, and derives visibility. No attribute
 Map contents are stored in `Records`.
 
 The wrapper's Graph branch decodes this full state to derive its visible
@@ -255,11 +294,12 @@ uses the native external enum shape, exported to TypeScript as `GraphJsonOp`:
 ```typescript
 type GraphJsonOp =
     | { create_node: { id: GraphNodeId } }
-    | { create_edge: { id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId } }
+    | { create_edge: { id: GraphEdgeId; source: GraphNodeId; target: GraphNodeId; position: string } }
     | { delete_node: { id: GraphNodeId } }
     | { delete_edge: { id: GraphEdgeId } }
     | { restore_node: { id: GraphNodeId; deletes: JsonOpID[] } }
-    | { restore_edge: { id: GraphEdgeId; deletes: JsonOpID[] } };
+    | { restore_edge: { id: GraphEdgeId; deletes: JsonOpID[] } }
+    | { set_edge_order: { id: GraphEdgeId; position: string } };
 ```
 
 Every identity inside Graph content is a decimal `"counter@peer"` string,

@@ -440,6 +440,7 @@ impl Diff {
             (Diff::Text(a), Diff::Text(b)) => a.transform_(b, left_prior),
             (Diff::Map(a), Diff::Map(b)) => a.transform(b, left_prior),
             (Diff::Tree(a), Diff::Tree(b)) => a.transform(b, left_prior),
+            (Diff::Graph(a), Diff::Graph(b)) => a.transform(b),
             #[cfg(feature = "counter")]
             (Diff::Counter(_a), Diff::Counter(_b)) => {
                 // Counter operations commute; no transformation is needed.

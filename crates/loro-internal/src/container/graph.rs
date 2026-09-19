@@ -1,5 +1,10 @@
 //! Native graph operations. Graph relations never become container ownership links.
-use loro_common::{ContainerID, GraphEdgeId, GraphNodeId, LoroError, LoroResult, ID};
+mod order;
+pub use order::{
+    GraphOrderError, GraphOrderTarget, GraphPosition, GraphReorderOutcome, OrderedGraphEdge,
+};
+
+use loro_common::{ContainerID, GraphEdgeId, GraphNodeId, IdFull, LoroError, LoroResult, ID};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +17,7 @@ pub enum GraphOp {
         id: GraphEdgeId,
         source: GraphNodeId,
         target: GraphNodeId,
+        position: GraphPosition,
     },
     DeleteNode {
         id: GraphNodeId,
@@ -28,6 +34,10 @@ pub enum GraphOp {
         id: GraphEdgeId,
         #[serde(with = "id_vec")]
         deletes: Vec<ID>,
+    },
+    SetEdgeOrder {
+        id: GraphEdgeId,
+        position: GraphPosition,
     },
 }
 impl GraphOp {
@@ -48,7 +58,9 @@ impl GraphOp {
                     return Err(bad());
                 }
             }
-            Self::CreateEdge { id, source, target } => {
+            Self::CreateEdge {
+                id, source, target, ..
+            } => {
                 if id.id() != op_id {
                     return Err(bad());
                 }
@@ -57,6 +69,7 @@ impl GraphOp {
             }
             Self::DeleteNode { id } => check(id.id())?,
             Self::DeleteEdge { id } => check(id.id())?,
+            Self::SetEdgeOrder { id, .. } => check(id.id())?,
             Self::RestoreNode { id, deletes } => {
                 check(id.id())?;
                 for tag in deletes {
@@ -109,6 +122,7 @@ impl GraphOp {
 pub struct GraphChange {
     #[serde(with = "op_id")]
     pub id: ID,
+    pub lamport: u32,
     pub op: GraphOp,
     pub forward: bool,
 }
@@ -126,10 +140,29 @@ pub struct GraphEdge {
     pub id: GraphEdgeId,
     pub source: GraphNodeId,
     pub target: GraphNodeId,
+    pub position: GraphPosition,
+    #[serde(with = "order_id")]
+    pub last_order: IdFull,
     pub alive: bool,
     pub visible: bool,
     #[serde(with = "id_vec")]
     pub delete_tags: Vec<ID>,
+}
+
+/// A position register value together with the identity that selected it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphOrderValue {
+    pub position: GraphPosition,
+    #[serde(with = "order_id")]
+    pub last_order: IdFull,
+}
+
+/// Net order change for editable diffs. Historical replay uses `GraphDiff::ops`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphOrderDelta {
+    pub source: GraphNodeId,
+    pub before: Option<GraphOrderValue>,
+    pub after: Option<GraphOrderValue>,
 }
 
 /// Changed records include incident edges whose visibility changed with an endpoint.
@@ -139,16 +172,101 @@ pub struct GraphDiff {
     pub ops: Vec<GraphChange>,
     pub nodes: std::collections::BTreeMap<GraphNodeId, Option<GraphNode>>,
     pub edges: std::collections::BTreeMap<GraphEdgeId, Option<GraphEdge>>,
+    pub orders: std::collections::BTreeMap<GraphEdgeId, GraphOrderDelta>,
 }
 impl GraphDiff {
     pub fn is_empty(&self) -> bool {
-        self.ops.is_empty() && self.nodes.is_empty() && self.edges.is_empty()
+        self.ops.is_empty()
+            && self.nodes.is_empty()
+            && self.edges.is_empty()
+            && self.orders.is_empty()
     }
     pub fn compose(mut self, other: Self) -> Self {
         self.ops.extend(other.ops);
         self.nodes.extend(other.nodes);
         self.edges.extend(other.edges);
+        for (id, delta) in other.orders {
+            if let Some(previous) = self.orders.get_mut(&id) {
+                previous.after = delta.after;
+            } else {
+                self.orders.insert(id, delta);
+            }
+        }
         self
+    }
+
+    /// Protect an independent winning order write when rebasing an editable diff.
+    /// Inverse history changes keep their target value even after a prior Undo
+    /// produced a fresh writer; the UndoManager's remote delta is the witness of
+    /// independent edits, rather than membership in the current write history.
+    pub(crate) fn transform(&mut self, other: &Self) {
+        self.transform_with_selected(other, |_| false);
+    }
+
+    pub(crate) fn transform_with_selected(&mut self, other: &Self, selected: impl Fn(ID) -> bool) {
+        let incoming: std::collections::BTreeSet<_> = other
+            .ops
+            .iter()
+            .filter_map(|change| {
+                if change.forward
+                    && matches!(
+                        change.op,
+                        GraphOp::SetEdgeOrder { .. } | GraphOp::CreateEdge { .. }
+                    )
+                {
+                    Some(change.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.orders.retain(|id, delta| {
+            let Some(base) = delta.before.as_ref() else {
+                return true;
+            };
+            let Some(remote) = other.orders.get(id).and_then(|delta| delta.after.as_ref()) else {
+                return true;
+            };
+            selected(remote.last_order.id())
+                || !incoming.contains(&remote.last_order.id())
+                || remote.last_order.idlp() <= base.last_order.idlp()
+        });
+    }
+
+    /// Rows touched solely by order writes keep their existing metadata subtree.
+    pub(crate) fn order_only_edges(&self) -> std::collections::BTreeSet<GraphEdgeId> {
+        use std::collections::BTreeSet;
+        let mut ordered = BTreeSet::new();
+        let mut lifecycle_edges = BTreeSet::new();
+        let mut lifecycle_nodes = BTreeSet::new();
+        for change in &self.ops {
+            match &change.op {
+                GraphOp::SetEdgeOrder { id, .. } => {
+                    ordered.insert(*id);
+                }
+                GraphOp::CreateEdge { id, .. }
+                | GraphOp::DeleteEdge { id }
+                | GraphOp::RestoreEdge { id, .. } => {
+                    lifecycle_edges.insert(*id);
+                }
+                GraphOp::CreateNode { id }
+                | GraphOp::DeleteNode { id }
+                | GraphOp::RestoreNode { id, .. } => {
+                    lifecycle_nodes.insert(*id);
+                }
+            }
+        }
+        ordered.retain(|id| {
+            !lifecycle_edges.contains(id)
+                && self
+                    .edges
+                    .get(id)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|e| {
+                        !lifecycle_nodes.contains(&e.source) && !lifecycle_nodes.contains(&e.target)
+                    })
+        });
+        ordered
     }
 }
 
@@ -161,13 +279,50 @@ impl GraphOp {
                 vec![(source.id(), None, false), (target.id(), None, false)]
             }
             Self::DeleteNode { id } => vec![(id.id(), None, false)],
-            Self::DeleteEdge { id } => vec![(id.id(), None, true)],
+            Self::DeleteEdge { id } | Self::SetEdgeOrder { id, .. } => vec![(id.id(), None, true)],
             Self::RestoreNode { id, deletes } => std::iter::once((id.id(), None, false))
                 .chain(deletes.iter().map(|d| (*d, Some(id.id()), false)))
                 .collect(),
             Self::RestoreEdge { id, deletes } => std::iter::once((id.id(), None, true))
                 .chain(deletes.iter().map(|d| (*d, Some(id.id()), true)))
                 .collect(),
+        }
+    }
+}
+
+mod order_id {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct HumanId {
+        #[serde(with = "op_id")]
+        id: ID,
+        lamport: u32,
+    }
+
+    pub fn serialize<S: serde::Serializer>(id: &IdFull, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            HumanId {
+                id: id.id(),
+                lamport: id.lamport,
+            }
+            .serialize(s)
+        } else {
+            id.serialize(s)
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<IdFull, D::Error> {
+        if d.is_human_readable() {
+            let id = HumanId::deserialize(d)?;
+            if id.id.counter < 0 {
+                return Err(serde::de::Error::custom(
+                    "Invalid Graph order operation identity",
+                ));
+            }
+            Ok(IdFull::new(id.id.peer, id.id.counter, id.lamport))
+        } else {
+            IdFull::deserialize(d)
         }
     }
 }

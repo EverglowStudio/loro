@@ -1,10 +1,15 @@
 //! Incremental remove-wins graph state. Only incident edges are re-evaluated on node changes.
 mod local_diff;
+pub(crate) mod order_index;
+use order_index::OrderIndex;
 
 use super::{ApplyLocalOpReturn, ContainerState, DiffApplyContext, FastStateSnapshot};
 use crate::{
     container::{
-        graph::{GraphChange, GraphDiff, GraphEdge, GraphNode, GraphOp},
+        graph::{
+            GraphChange, GraphDiff, GraphEdge, GraphNode, GraphOp, GraphOrderDelta,
+            GraphOrderValue, GraphPosition, OrderedGraphEdge,
+        },
         idx::ContainerIdx,
     },
     event::{Diff, Index, InternalDiff},
@@ -12,8 +17,8 @@ use crate::{
     LoroDocInner,
 };
 use loro_common::{
-    ContainerID, ContainerType, GraphEdgeId, GraphNodeId, LoroError, LoroResult, LoroValue, TreeID,
-    ID,
+    ContainerID, ContainerType, GraphEdgeId, GraphNodeId, IdFull, IdLp, LoroError, LoroResult,
+    LoroValue, TreeID, ID,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,38 +28,43 @@ use std::{
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Life {
-    deletes: BTreeSet<ID>,
+    created_at: u32,
+    deletes: BTreeMap<ID, u32>,
     // Retain restore identities so history retreat can remove exactly one restore.
-    restores: BTreeMap<ID, Vec<ID>>,
+    restores: BTreeMap<ID, (u32, Vec<ID>)>,
     #[serde(skip)]
     removed: BTreeMap<ID, usize>,
 }
 impl Life {
     fn active(&self) -> Vec<ID> {
         self.deletes
-            .iter()
+            .keys()
             .filter(|id| !self.removed.contains_key(id))
             .copied()
             .collect()
     }
     fn alive(&self) -> bool {
-        self.deletes.iter().all(|id| self.removed.contains_key(id))
+        self.deletes.keys().all(|id| self.removed.contains_key(id))
     }
-    fn delete(&mut self, id: ID, forward: bool) {
+    fn delete(&mut self, id: ID, lamport: u32, forward: bool) {
         if forward {
-            self.deletes.insert(id);
+            self.deletes.insert(id, lamport);
         } else {
             self.deletes.remove(&id);
         }
     }
-    fn restore(&mut self, id: ID, deletes: &[ID], forward: bool) {
+    fn restore(&mut self, id: ID, lamport: u32, deletes: &[ID], forward: bool) {
         if forward {
-            if self.restores.insert(id, deletes.to_vec()).is_none() {
+            if self
+                .restores
+                .insert(id, (lamport, deletes.to_vec()))
+                .is_none()
+            {
                 for tag in deletes {
                     *self.removed.entry(*tag).or_default() += 1;
                 }
             }
-        } else if let Some(tags) = self.restores.remove(&id) {
+        } else if let Some((_, tags)) = self.restores.remove(&id) {
             for tag in tags {
                 let n = self.removed.get_mut(&tag).expect("restore tag count");
                 *n -= 1;
@@ -66,7 +76,7 @@ impl Life {
     }
     fn rebuild(&mut self) {
         self.removed.clear();
-        for tags in self.restores.values() {
+        for (_, tags) in self.restores.values() {
             for tag in tags {
                 *self.removed.entry(*tag).or_default() += 1;
             }
@@ -78,6 +88,20 @@ struct Edge {
     source: GraphNodeId,
     target: GraphNodeId,
     life: Life,
+    // The order of writes is independent from the order of fractional keys.
+    orders: BTreeMap<IdLp, (i32, GraphPosition)>,
+}
+impl Edge {
+    fn order(&self) -> GraphOrderValue {
+        let (id, (counter, position)) = self
+            .orders
+            .last_key_value()
+            .expect("edge creation has a position");
+        GraphOrderValue {
+            position: position.clone(),
+            last_order: IdFull::new(id.peer, *counter, id.lamport),
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Records {
@@ -92,6 +116,9 @@ pub struct GraphState {
     outgoing: BTreeMap<GraphNodeId, BTreeSet<GraphEdgeId>>,
     visible_nodes: BTreeSet<GraphNodeId>,
     visible_edges: BTreeSet<GraphEdgeId>,
+    pub(crate) ordered_outgoing: BTreeMap<GraphNodeId, OrderIndex>,
+    /// Local key-generation policy, never persisted or synchronized.
+    pub(crate) order_jitter: u8,
 }
 fn invalid() -> LoroError {
     LoroError::DecodeError("Invalid graph reference or lifecycle operation".into())
@@ -105,6 +132,8 @@ impl GraphState {
             outgoing: BTreeMap::new(),
             visible_nodes: BTreeSet::new(),
             visible_edges: BTreeSet::new(),
+            ordered_outgoing: BTreeMap::new(),
+            order_jitter: 0,
         }
     }
     pub fn nodes(&self) -> Vec<GraphNodeId> {
@@ -130,10 +159,13 @@ impl GraphState {
     }
     pub fn edge_record(&self, id: GraphEdgeId) -> Option<GraphEdge> {
         let edge = self.records.edges.get(&id)?;
+        let order = edge.order();
         Some(GraphEdge {
             id,
             source: edge.source,
             target: edge.target,
+            position: order.position,
+            last_order: order.last_order,
             alive: edge.life.alive(),
             visible: self.visible_edges.contains(&id),
             delete_tags: edge.life.active(),
@@ -169,6 +201,36 @@ impl GraphState {
         .copied()
         .collect())
     }
+    pub fn ordered_out_edges(&self, source: GraphNodeId) -> LoroResult<Vec<OrderedGraphEdge>> {
+        if !self.records.nodes.contains_key(&source) {
+            return Err(invalid());
+        }
+        Ok(self
+            .ordered_outgoing
+            .get(&source)
+            .into_iter()
+            .flat_map(OrderIndex::iter)
+            .map(|id| self.ordered_edge(id))
+            .collect())
+    }
+    pub fn out_edge_at(&self, source: GraphNodeId, index: usize) -> Option<OrderedGraphEdge> {
+        self.ordered_outgoing
+            .get(&source)?
+            .at(index)
+            .map(|id| self.ordered_edge(id))
+    }
+    pub fn index_of_out_edge(&self, id: GraphEdgeId) -> Option<usize> {
+        let edge = self.records.edges.get(&id)?;
+        self.ordered_outgoing.get(&edge.source)?.rank(id)
+    }
+    fn ordered_edge(&self, id: GraphEdgeId) -> OrderedGraphEdge {
+        let edge = &self.records.edges[&id];
+        OrderedGraphEdge {
+            edge_id: id,
+            target: edge.target,
+            position: edge.order().position,
+        }
+    }
     fn incident(&self, id: GraphNodeId) -> BTreeSet<GraphEdgeId> {
         self.incoming
             .get(&id)
@@ -179,11 +241,23 @@ impl GraphState {
             .collect()
     }
     fn update_edge(&mut self, id: GraphEdgeId) {
-        let visible = self.records.edges.get(&id).is_some_and(|e| {
+        let edge = self.records.edges.get(&id);
+        let visible = edge.is_some_and(|e| {
             e.life.alive()
                 && self.visible_nodes.contains(&e.source)
                 && self.visible_nodes.contains(&e.target)
         });
+        if let Some(edge) = edge {
+            if let Some(index) = self.ordered_outgoing.get_mut(&edge.source) {
+                index.remove(id);
+            }
+            if visible {
+                self.ordered_outgoing
+                    .entry(edge.source)
+                    .or_default()
+                    .insert(edge.order().position, id);
+            }
+        }
         if visible {
             self.visible_edges.insert(id);
         } else {
@@ -223,7 +297,9 @@ impl GraphState {
                         return Err(invalid());
                     }
                 }
-                GraphOp::CreateEdge { id, source, target } => {
+                GraphOp::CreateEdge {
+                    id, source, target, ..
+                } => {
                     if self.records.edges.contains_key(id)
                         || self
                             .records
@@ -245,7 +321,9 @@ impl GraphState {
                         return Err(invalid());
                     }
                 }
-                GraphOp::DeleteEdge { id } | GraphOp::RestoreEdge { id, .. } => {
+                GraphOp::DeleteEdge { id }
+                | GraphOp::RestoreEdge { id, .. }
+                | GraphOp::SetEdgeOrder { id, .. } => {
                     if !self.records.edges.contains_key(id) && !edges.contains(id) {
                         return Err(invalid());
                     }
@@ -265,7 +343,7 @@ impl GraphState {
                                 .records
                                 .nodes
                                 .get(id)
-                                .is_some_and(|n| n.deletes.contains(tag))
+                                .is_some_and(|n| n.deletes.contains_key(tag))
                         {
                             return Err(invalid());
                         }
@@ -278,7 +356,7 @@ impl GraphState {
                                 .records
                                 .edges
                                 .get(id)
-                                .is_some_and(|e| e.life.deletes.contains(tag))
+                                .is_some_and(|e| e.life.deletes.contains_key(tag))
                         {
                             return Err(invalid());
                         }
@@ -294,16 +372,34 @@ impl GraphState {
         for c in changes {
             let mut ns = BTreeSet::new();
             let mut es = BTreeSet::new();
+            let order_before = match &c.op {
+                GraphOp::CreateEdge { id, source, .. } => {
+                    Some((*id, *source, self.records.edges.get(id).map(Edge::order)))
+                }
+                GraphOp::SetEdgeOrder { id, .. } => {
+                    let edge = self.records.edges.get(id).expect("validated edge");
+                    Some((*id, edge.source, Some(edge.order())))
+                }
+                _ => None,
+            };
             match &c.op {
                 GraphOp::CreateNode { id } => {
                     ns.insert(*id);
                     if c.forward {
-                        self.records.nodes.entry(*id).or_default();
+                        self.records.nodes.entry(*id).or_insert_with(|| Life {
+                            created_at: c.lamport,
+                            ..Default::default()
+                        });
                     } else {
                         self.records.nodes.remove(id);
                     }
                 }
-                GraphOp::CreateEdge { id, source, target } => {
+                GraphOp::CreateEdge {
+                    id,
+                    source,
+                    target,
+                    position,
+                } => {
                     es.insert(*id);
                     if c.forward {
                         self.records.edges.insert(
@@ -311,12 +407,22 @@ impl GraphState {
                             Edge {
                                 source: *source,
                                 target: *target,
-                                life: Life::default(),
+                                life: Life {
+                                    created_at: c.lamport,
+                                    ..Default::default()
+                                },
+                                orders: BTreeMap::from([(
+                                    IdLp::new(c.id.peer, c.lamport),
+                                    (c.id.counter, position.clone()),
+                                )]),
                             },
                         );
                         self.outgoing.entry(*source).or_default().insert(*id);
                         self.incoming.entry(*target).or_default().insert(*id);
                     } else {
+                        if let Some(index) = self.ordered_outgoing.get_mut(source) {
+                            index.remove(*id);
+                        }
                         self.records.edges.remove(id);
                         if let Some(s) = self.outgoing.get_mut(source) {
                             s.remove(id);
@@ -332,7 +438,7 @@ impl GraphState {
                         .nodes
                         .get_mut(id)
                         .expect("validated node")
-                        .delete(c.id, c.forward);
+                        .delete(c.id, c.lamport, c.forward);
                 }
                 GraphOp::DeleteEdge { id } => {
                     es.insert(*id);
@@ -341,7 +447,7 @@ impl GraphState {
                         .get_mut(id)
                         .expect("validated edge")
                         .life
-                        .delete(c.id, c.forward);
+                        .delete(c.id, c.lamport, c.forward);
                 }
                 GraphOp::RestoreNode { id, deletes } => {
                     ns.insert(*id);
@@ -349,7 +455,7 @@ impl GraphState {
                         .nodes
                         .get_mut(id)
                         .expect("validated node")
-                        .restore(c.id, deletes, c.forward);
+                        .restore(c.id, c.lamport, deletes, c.forward);
                 }
                 GraphOp::RestoreEdge { id, deletes } => {
                     es.insert(*id);
@@ -358,7 +464,36 @@ impl GraphState {
                         .get_mut(id)
                         .expect("validated edge")
                         .life
-                        .restore(c.id, deletes, c.forward);
+                        .restore(c.id, c.lamport, deletes, c.forward);
+                }
+                GraphOp::SetEdgeOrder { id, position } => {
+                    es.insert(*id);
+                    let orders = &mut self
+                        .records
+                        .edges
+                        .get_mut(id)
+                        .expect("validated edge")
+                        .orders;
+                    let write = IdLp::new(c.id.peer, c.lamport);
+                    if c.forward {
+                        orders.insert(write, (c.id.counter, position.clone()));
+                    } else {
+                        orders.remove(&write);
+                    }
+                }
+            }
+            if let Some((id, source, before)) = order_before {
+                let after = self.records.edges.get(&id).map(Edge::order);
+                if before != after {
+                    result
+                        .orders
+                        .entry(id)
+                        .and_modify(|delta| delta.after = after.clone())
+                        .or_insert(GraphOrderDelta {
+                            source,
+                            before,
+                            after,
+                        });
                 }
             }
             for id in ns {
@@ -376,6 +511,37 @@ impl GraphState {
     }
     pub(crate) fn preview(&self, change: GraphChange) -> LoroResult<GraphDiff> {
         self.validate_changes(std::slice::from_ref(&change))?;
+        if let GraphOp::SetEdgeOrder { id, position } = &change.op {
+            if change.forward {
+                // A local order preview needs the winning register only. Copying
+                // the edge's entire history would make repeated drags quadratic.
+                let mut edge = self.edge_record(*id).expect("validated edge");
+                let before = GraphOrderValue {
+                    position: edge.position.clone(),
+                    last_order: edge.last_order,
+                };
+                let mut diff = GraphDiff::default();
+                if IdLp::new(change.id.peer, change.lamport) > edge.last_order.idlp() {
+                    edge.position = position.clone();
+                    edge.last_order =
+                        IdFull::new(change.id.peer, change.id.counter, change.lamport);
+                    diff.orders.insert(
+                        *id,
+                        GraphOrderDelta {
+                            source: edge.source,
+                            before: Some(before),
+                            after: Some(GraphOrderValue {
+                                position: edge.position.clone(),
+                                last_order: edge.last_order,
+                            }),
+                        },
+                    );
+                }
+                diff.edges.insert(*id, Some(edge));
+                diff.ops.push(change);
+                return Ok(diff);
+            }
+        }
         // Event records are computed from the affected object and its adjacency only.
         let mut local = Self::new(self.idx);
         let mut ns = BTreeSet::new();
@@ -387,12 +553,16 @@ impl GraphState {
                 ns.insert(*id);
                 es.extend(self.incident(*id));
             }
-            GraphOp::CreateEdge { id, source, target } => {
+            GraphOp::CreateEdge {
+                id, source, target, ..
+            } => {
                 es.insert(*id);
                 ns.insert(*source);
                 ns.insert(*target);
             }
-            GraphOp::DeleteEdge { id } | GraphOp::RestoreEdge { id, .. } => {
+            GraphOp::DeleteEdge { id }
+            | GraphOp::RestoreEdge { id, .. }
+            | GraphOp::SetEdgeOrder { id, .. } => {
                 es.insert(*id);
             }
         }
@@ -420,7 +590,7 @@ impl GraphState {
     }
     pub fn value(&self) -> LoroValue {
         let nodes:Vec<LoroValue>=self.nodes().into_iter().map(|id|crate::fx_map!("id".to_string()=>id.to_string().into(), "meta".to_string()=>LoroValue::Container(id.associated_meta_container())).into()).collect();
-        let edges:Vec<LoroValue>=self.edges().into_iter().map(|id|{let e=&self.records.edges[&id]; crate::fx_map!("id".to_string()=>id.to_string().into(),"source".to_string()=>e.source.to_string().into(),"target".to_string()=>e.target.to_string().into(),"meta".to_string()=>LoroValue::Container(id.associated_meta_container())).into()}).collect();
+        let edges:Vec<LoroValue>=self.edges().into_iter().map(|id|{let e=&self.records.edges[&id]; crate::fx_map!("id".to_string()=>id.to_string().into(),"source".to_string()=>e.source.to_string().into(),"target".to_string()=>e.target.to_string().into(),"position".to_string()=>e.order().position.to_string().into(),"meta".to_string()=>LoroValue::Container(id.associated_meta_container())).into()}).collect();
         crate::fx_map!("nodes".to_string()=>nodes.into(),"edges".to_string()=>edges.into()).into()
     }
     fn rebuild(&mut self) -> LoroResult<()> {
@@ -429,18 +599,23 @@ impl GraphState {
             if id.counter < 0 || !ids.insert(id) {
                 return Err(invalid());
             }
-            for tag in &life.deletes {
-                if tag.counter < 0 || !ids.insert(*tag) {
+            for (tag, lamport) in &life.deletes {
+                if tag.counter < 0 || *lamport <= life.created_at || !ids.insert(*tag) {
                     return Err(invalid());
                 }
             }
-            for (restore, tags) in &life.restores {
-                if restore.counter < 0 || !ids.insert(*restore) {
+            for (restore, (lamport, tags)) in &life.restores {
+                if restore.counter < 0 || *lamport <= life.created_at || !ids.insert(*restore) {
                     return Err(invalid());
                 }
                 let mut seen = BTreeSet::new();
                 for tag in tags {
-                    if !life.deletes.contains(tag) || !seen.insert(tag) {
+                    if !life
+                        .deletes
+                        .get(tag)
+                        .is_some_and(|delete_lp| delete_lp < lamport)
+                        || !seen.insert(tag)
+                    {
                         return Err(invalid());
                     }
                 }
@@ -452,6 +627,27 @@ impl GraphState {
         }
         for (id, e) in &self.records.edges {
             validate_life(id.id(), &e.life)?;
+        }
+        for (id, edge) in &self.records.edges {
+            let creation = IdLp::new(id.peer, edge.life.created_at);
+            if !edge
+                .orders
+                .get(&creation)
+                .is_some_and(|(counter, _)| *counter == id.counter)
+            {
+                return Err(invalid());
+            }
+            for (write, (counter, _)) in &edge.orders {
+                if *write == creation {
+                    continue;
+                }
+                if *counter < 0
+                    || write.lamport <= creation.lamport
+                    || !ids.insert(ID::new(write.peer, *counter))
+                {
+                    return Err(invalid());
+                }
+            }
         }
         for (id, life) in &mut self.records.nodes {
             if id.counter < 0 {
@@ -509,6 +705,7 @@ impl ContainerState for GraphState {
         };
         let c = GraphChange {
             id: raw.id,
+            lamport: raw.lamport,
             op: (**op).clone(),
             forward: true,
         };
@@ -521,19 +718,22 @@ impl ContainerState for GraphState {
         for (id, l) in &self.records.nodes {
             d.ops.push(GraphChange {
                 id: id.id(),
+                lamport: l.created_at,
                 op: GraphOp::CreateNode { id: *id },
                 forward: true,
             });
-            for t in &l.deletes {
+            for (t, lamport) in &l.deletes {
                 d.ops.push(GraphChange {
                     id: *t,
+                    lamport: *lamport,
                     op: GraphOp::DeleteNode { id: *id },
                     forward: true,
                 });
             }
-            for (t, ds) in &l.restores {
+            for (t, (lamport, ds)) in &l.restores {
                 d.ops.push(GraphChange {
                     id: *t,
+                    lamport: *lamport,
                     op: GraphOp::RestoreNode {
                         id: *id,
                         deletes: ds.clone(),
@@ -546,23 +746,49 @@ impl ContainerState for GraphState {
         for (id, e) in &self.records.edges {
             d.ops.push(GraphChange {
                 id: id.id(),
+                lamport: e.life.created_at,
                 op: GraphOp::CreateEdge {
                     id: *id,
                     source: e.source,
                     target: e.target,
+                    position: e.orders[&IdLp::new(id.peer, e.life.created_at)].1.clone(),
                 },
                 forward: true,
             });
-            for t in &e.life.deletes {
+            for (write, (counter, position)) in &e.orders {
+                if ID::new(write.peer, *counter) == id.id() {
+                    continue;
+                }
+                d.ops.push(GraphChange {
+                    id: ID::new(write.peer, *counter),
+                    lamport: write.lamport,
+                    op: GraphOp::SetEdgeOrder {
+                        id: *id,
+                        position: position.clone(),
+                    },
+                    forward: true,
+                });
+            }
+            d.orders.insert(
+                *id,
+                GraphOrderDelta {
+                    source: e.source,
+                    before: None,
+                    after: Some(e.order()),
+                },
+            );
+            for (t, lamport) in &e.life.deletes {
                 d.ops.push(GraphChange {
                     id: *t,
+                    lamport: *lamport,
                     op: GraphOp::DeleteEdge { id: *id },
                     forward: true,
                 });
             }
-            for (t, ds) in &e.life.restores {
+            for (t, (lamport, ds)) in &e.life.restores {
                 d.ops.push(GraphChange {
                     id: *t,
+                    lamport: *lamport,
                     op: GraphOp::RestoreEdge {
                         id: *id,
                         deletes: ds.clone(),
@@ -572,6 +798,7 @@ impl ContainerState for GraphState {
             }
             d.edges.insert(*id, self.edge_record(*id));
         }
+        d.ops.sort_by_key(|change| (change.lamport, change.id.peer));
         Diff::Graph(d)
     }
     fn get_value(&mut self) -> LoroValue {
@@ -655,5 +882,290 @@ impl GraphState {
         s.records = records;
         s.rebuild()?;
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+
+    fn position(first: u8) -> GraphPosition {
+        GraphPosition::try_from_bytes(vec![first, 128]).unwrap()
+    }
+
+    fn change(peer: u64, counter: i32, lamport: u32, op: GraphOp) -> GraphChange {
+        GraphChange {
+            id: ID::new(peer, counter),
+            lamport,
+            op,
+            forward: true,
+        }
+    }
+
+    fn fixture() -> (GraphState, GraphNodeId, GraphEdgeId) {
+        let mut state = GraphState::new(ContainerIdx::from_index_and_type(0, ContainerType::Graph));
+        let source = GraphNodeId::new(7, 0);
+        let target = GraphNodeId::new(7, 1);
+        let edge = GraphEdgeId::new(7, 2);
+        state.apply_changes(vec![
+            change(7, 0, 0, GraphOp::CreateNode { id: source }),
+            change(7, 1, 1, GraphOp::CreateNode { id: target }),
+            change(
+                7,
+                2,
+                2,
+                GraphOp::CreateEdge {
+                    id: edge,
+                    source,
+                    target,
+                    position: position(128),
+                },
+            ),
+        ]);
+        (state, source, edge)
+    }
+
+    fn moved(edge: GraphEdgeId, peer: u64, counter: i32, lamport: u32, first: u8) -> GraphChange {
+        change(
+            peer,
+            counter,
+            lamport,
+            GraphOp::SetEdgeOrder {
+                id: edge,
+                position: position(first),
+            },
+        )
+    }
+
+    fn inverse(mut op: GraphChange) -> GraphChange {
+        op.forward = false;
+        op
+    }
+
+    #[test]
+    fn order_winner_uses_lamport_peer_and_retains_losing_history() {
+        let (mut state, source, edge) = fixture();
+        let low_clock = moved(edge, 1000, 0, 3, 240);
+        let winner = moved(edge, 1, 0, 4, 16);
+        state.apply_changes(vec![winner.clone(), low_clock.clone()]);
+        let record = state.edge_record(edge).unwrap();
+        assert_eq!(record.position, position(16));
+        assert_eq!(record.last_order, IdFull::new(1, 0, 4));
+        assert_eq!(state.out_edge_at(source, 0).unwrap().edge_id, edge);
+        state.apply_changes(vec![inverse(winner)]);
+        assert_eq!(state.edge_record(edge).unwrap().position, position(240));
+        assert_eq!(state.index_of_out_edge(edge), Some(0));
+        let tie_winner = moved(edge, 1001, 0, 3, 32);
+        state.apply_changes(vec![tie_winner.clone()]);
+        assert_eq!(state.edge_record(edge).unwrap().position, position(32));
+        state.apply_changes(vec![inverse(tie_winner), inverse(low_clock)]);
+        assert_eq!(state.edge_record(edge).unwrap().position, position(128));
+    }
+
+    #[test]
+    fn hidden_order_survives_snapshot_and_restoration() {
+        let (mut state, source, edge) = fixture();
+        let deleted = change(7, 3, 3, GraphOp::DeleteNode { id: source });
+        state.apply_changes(vec![deleted.clone(), moved(edge, 8, 0, 4, 16)]);
+        assert!(state.ordered_out_edges(source).unwrap().is_empty());
+        assert_eq!(state.index_of_out_edge(edge), None);
+        state.order_jitter = 9;
+        let mut bytes = Vec::new();
+        state.encode_snapshot_fast(&mut bytes);
+        let mut decoded = GraphState::decode_records(state.idx, &bytes).unwrap();
+        assert_eq!(decoded.order_jitter, 0);
+        decoded.apply_changes(vec![change(
+            7,
+            4,
+            5,
+            GraphOp::RestoreNode {
+                id: source,
+                deletes: vec![deleted.id],
+            },
+        )]);
+        assert_eq!(
+            decoded.out_edge_at(source, 0).unwrap().position,
+            position(16)
+        );
+        decoded.apply_changes(vec![moved(edge, 8, 1, 6, 200)]);
+        assert_eq!(decoded.index_of_out_edge(edge), Some(0));
+        let mut bytes = Vec::new();
+        decoded.encode_snapshot_fast(&mut bytes);
+        let restored = GraphState::decode_records(decoded.idx, &bytes).unwrap();
+        assert_eq!(restored.edge_record(edge), decoded.edge_record(edge));
+    }
+
+    #[test]
+    fn equal_positions_use_edge_identity_and_retreat_removes_index_entry() {
+        let (mut state, source, first) = fixture();
+        let second = GraphEdgeId::new(9, 0);
+        let create = change(
+            9,
+            0,
+            3,
+            GraphOp::CreateEdge {
+                id: second,
+                source,
+                target: source,
+                position: position(128),
+            },
+        );
+        state.apply_changes(vec![create.clone()]);
+        assert_eq!(
+            state
+                .ordered_out_edges(source)
+                .unwrap()
+                .iter()
+                .map(|edge| edge.edge_id)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert_eq!(state.index_of_out_edge(second), Some(1));
+        state.apply_changes(vec![inverse(create)]);
+        assert!(state.edge_record(second).is_none());
+        assert_eq!(state.ordered_out_edges(source).unwrap().len(), 1);
+        assert_eq!(state.out_edge_at(source, 1), None);
+    }
+
+    #[test]
+    fn full_diff_keeps_original_creation_and_all_real_write_clocks() {
+        let (mut state, _, edge) = fixture();
+        let write = moved(edge, 1, 0, 4, 16);
+        state.apply_changes(vec![write.clone()]);
+        let Diff::Graph(diff) = state.to_diff(&Weak::new()) else {
+            unreachable!()
+        };
+        let creation = diff
+            .ops
+            .iter()
+            .find(|change| change.id == edge.id())
+            .unwrap();
+        assert_eq!(creation.lamport, 2);
+        assert!(
+            matches!(&creation.op, GraphOp::CreateEdge { position: p, .. } if p == &position(128))
+        );
+        assert!(diff.ops.contains(&write));
+        let mut replayed = GraphState::new(state.idx);
+        replayed.validate_changes(&diff.ops).unwrap();
+        replayed.apply_changes(diff.ops);
+        assert_eq!(replayed.edge_record(edge), state.edge_record(edge));
+        replayed.apply_changes(vec![inverse(write)]);
+        assert_eq!(replayed.edge_record(edge).unwrap().position, position(128));
+    }
+
+    #[test]
+    fn net_order_diff_supports_successive_undo_and_foreign_write_ids() {
+        let (mut state, _, edge) = fixture();
+        let first = moved(edge, 7, 3, 3, 32);
+        let second = moved(edge, 7, 4, 4, 240);
+        let initial = state.clone();
+        let first_diff = state.apply_changes(vec![first.clone()]);
+        let first_state = state.clone();
+        let second_diff = state.apply_changes(vec![second.clone()]);
+        let composed = first_diff.compose(second_diff);
+        assert_eq!(
+            composed.orders[&edge].before.as_ref().unwrap().position,
+            position(128)
+        );
+        assert_eq!(
+            composed.orders[&edge].after.as_ref().unwrap().position,
+            position(240)
+        );
+
+        let mut checkout = state.clone();
+        let undo_second = checkout.apply_changes(vec![inverse(second)]);
+        let plan = state.local_diff_ops(&undo_second, |id| id).unwrap();
+        assert_eq!(
+            plan,
+            vec![GraphOp::SetEdgeOrder {
+                id: edge,
+                position: position(32)
+            }]
+        );
+        state.apply_changes(vec![change(7, 5, 5, plan[0].clone())]);
+        let undo_first = checkout.apply_changes(vec![inverse(first)]);
+        let plan = state.local_diff_ops(&undo_first, |id| id).unwrap();
+        assert_eq!(
+            plan,
+            vec![GraphOp::SetEdgeOrder {
+                id: edge,
+                position: position(128)
+            }]
+        );
+
+        // A copied state holds no source order writer; net inverse remains usable.
+        let mut copy = initial;
+        copy.apply_changes(vec![moved(edge, 99, 0, 9, 32)]);
+        assert_eq!(copy.local_diff_ops(&undo_first, |id| id).unwrap(), plan);
+        assert_eq!(
+            first_state.edge_record(edge).unwrap().position,
+            position(32)
+        );
+    }
+
+    #[test]
+    fn order_transform_preserves_remote_winner_but_not_unrelated_edges() {
+        let (mut state, _, edge) = fixture();
+        let local = moved(edge, 7, 3, 3, 32);
+        state.apply_changes(vec![local.clone()]);
+        let mut checkout = state.clone();
+        let mut undo = checkout.apply_changes(vec![inverse(local)]);
+        let remote = state.apply_changes(vec![moved(edge, 9, 0, 4, 32)]);
+        // Same value, different winning identity still protects the remote edit.
+        undo.transform(&remote);
+        assert!(undo.orders.is_empty());
+        assert!(state.local_diff_ops(&undo, |id| id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_undo_spans_keep_selected_writers_and_protect_same_peer_outside_selection() {
+        let (mut state, _, edge) = fixture();
+        let first = moved(edge, 7, 3, 3, 32);
+        let second = moved(edge, 7, 4, 7, 240);
+        state.apply_changes(vec![first.clone()]);
+        let mut before = state.clone();
+        let first_undo = before.apply_changes(vec![inverse(first)]);
+        let between_spans = state.apply_changes(vec![second.clone()]);
+        let mut undo = first_undo.clone();
+        undo.transform_with_selected(&between_spans, |id| {
+            loro_common::IdSpan::new(7, 3, 5).contains(id)
+        });
+        assert_eq!(undo.orders.len(), 1);
+
+        // The later span is undone first when composing the final net delta.
+        let second_undo = state.apply_changes(vec![inverse(second)]);
+        let combined = second_undo.compose(undo);
+        assert_eq!(
+            combined.orders[&edge].after.as_ref().unwrap().position,
+            position(128)
+        );
+
+        let outside_selection = state.apply_changes(vec![moved(edge, 7, 8, 10, 200)]);
+        let mut undo = first_undo;
+        undo.transform_with_selected(&outside_selection, |id| {
+            loro_common::IdSpan::new(7, 3, 5).contains(id)
+        });
+        assert!(
+            undo.orders.is_empty(),
+            "same peer alone does not imply membership in this undo"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_missing_creation_write_and_reused_operation_identity() {
+        let (mut state, _, edge) = fixture();
+        state.records.edges.get_mut(&edge).unwrap().orders.clear();
+        let bytes = postcard::to_stdvec(&state.records).unwrap();
+        assert!(GraphState::decode_records(state.idx, &bytes).is_err());
+        let (mut state, _, edge) = fixture();
+        state
+            .records
+            .edges
+            .get_mut(&edge)
+            .unwrap()
+            .orders
+            .insert(IdLp::new(7, 10), (1, position(16)));
+        let bytes = postcard::to_stdvec(&state.records).unwrap();
+        assert!(GraphState::decode_records(state.idx, &bytes).is_err());
     }
 }

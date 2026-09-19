@@ -1,7 +1,10 @@
 use super::{
     create_handler, BasicHandler, DetachedInner, Handler, HandlerTrait, MapHandler, MaybeDetached,
 };
-pub use crate::container::graph::{GraphDiff, GraphEdge, GraphNode};
+pub use crate::container::graph::{
+    GraphDiff, GraphEdge, GraphNode, GraphOrderError, GraphOrderTarget, GraphPosition,
+    GraphReorderOutcome, OrderedGraphEdge,
+};
 use crate::{
     container::{
         graph::{GraphChange, GraphOp},
@@ -67,6 +70,7 @@ impl GraphHandler {
                 let op = f(id, &g.state)?;
                 let change = GraphChange {
                     id,
+                    lamport: id.counter as u32,
                     op: op.clone(),
                     forward: true,
                 };
@@ -90,6 +94,7 @@ impl GraphHandler {
         let a = self.inner.try_attached_state()?;
         let c = GraphChange {
             id: txn.next_id(),
+            lamport: txn.next_idlp().lamport,
             op: op.clone(),
             forward: true,
         };
@@ -109,15 +114,175 @@ impl GraphHandler {
         })
         .map(GraphNodeId::from_id)
     }
+    /// Append to the current visible outgoing sequence. Hidden endpoints retain records.
     pub fn create_edge(&self, source: GraphNodeId, target: GraphNodeId) -> LoroResult<GraphEdgeId> {
-        self.write(|id, _| {
-            Ok(GraphOp::CreateEdge {
-                id: GraphEdgeId::from_id(id),
-                source,
-                target,
+        self.create_edge_at(source, target, GraphOrderTarget::End)
+            .map_err(|e| match e {
+                GraphOrderError::Engine(e) => e,
+                e => LoroError::ArgErr(e.to_string().into()),
             })
-        })
-        .map(GraphEdgeId::from_id)
+    }
+    pub fn create_edge_at(
+        &self,
+        source: GraphNodeId,
+        target: GraphNodeId,
+        destination: GraphOrderTarget,
+    ) -> Result<GraphEdgeId, GraphOrderError> {
+        let (id, _) = self.edit_order(None, Some((source, target)), destination)?;
+        Ok(id)
+    }
+    pub fn reorder_edge(
+        &self,
+        edge: GraphEdgeId,
+        destination: GraphOrderTarget,
+    ) -> Result<GraphReorderOutcome, GraphOrderError> {
+        self.edit_order(Some(edge), None, destination)
+            .map(|(_, outcome)| outcome)
+    }
+    /// Local allocation policy, never replicated or used when interpreting received keys.
+    pub fn configure_order_jitter(&self, jitter: u8) {
+        match &self.inner {
+            MaybeDetached::Detached(d) => d.lock().value.state.order_jitter = jitter,
+            MaybeDetached::Attached(a) => {
+                let _guard = a.doc.txn.lock();
+                a.with_state(|s| s.as_graph_state_mut().unwrap().order_jitter = jitter);
+            }
+        }
+    }
+    pub fn ordered_out_edges(&self, source: GraphNodeId) -> LoroResult<Vec<OrderedGraphEdge>> {
+        self.read(|s| s.ordered_out_edges(source))
+    }
+    pub fn out_edge_at(&self, source: GraphNodeId, index: usize) -> Option<OrderedGraphEdge> {
+        self.read(|s| s.out_edge_at(source, index))
+    }
+    pub fn index_of_out_edge(&self, edge: GraphEdgeId) -> Option<usize> {
+        self.read(|s| s.index_of_out_edge(edge))
+    }
+    fn edit_order(
+        &self,
+        moving: Option<GraphEdgeId>,
+        create: Option<(GraphNodeId, GraphNodeId)>,
+        destination: GraphOrderTarget,
+    ) -> Result<(GraphEdgeId, GraphReorderOutcome), GraphOrderError> {
+        let prepare = |state: &GraphState| -> Result<Option<OrderEdit>, GraphOrderError> {
+            let source = if let Some((source, target)) = create {
+                if state.node_record(source).is_none() || state.node_record(target).is_none() {
+                    return Err(GraphOrderError::MissingNode);
+                }
+                source
+            } else {
+                state
+                    .edge_record(moving.unwrap())
+                    .filter(|e| e.visible)
+                    .ok_or(GraphOrderError::EdgeNotVisible)?
+                    .source
+            };
+            plan_order(state, source, moving, destination)
+        };
+        match &self.inner {
+            MaybeDetached::Detached(d) => {
+                let mut d = d.lock();
+                let graph = &mut d.value;
+                let Some(plan) = prepare(&graph.state)? else {
+                    return Ok((
+                        moving.unwrap(),
+                        GraphReorderOutcome {
+                            changed: false,
+                            auxiliary_updates: 0,
+                        },
+                    ));
+                };
+                check_order_capacity(
+                    graph.next,
+                    graph.next.counter as u32,
+                    plan.auxiliary.len() + 1,
+                )?;
+                let edge = moving.unwrap_or_else(|| GraphEdgeId::from_id(graph.next));
+                let op = match create {
+                    Some((source, target)) => GraphOp::CreateEdge {
+                        id: edge,
+                        source,
+                        target,
+                        position: plan.position,
+                    },
+                    None => GraphOp::SetEdgeOrder {
+                        id: edge,
+                        position: plan.position,
+                    },
+                };
+                let auxiliary_updates = plan.auxiliary.len();
+                for op in std::iter::once(op).chain(
+                    plan.auxiliary
+                        .into_iter()
+                        .map(|(id, position)| GraphOp::SetEdgeOrder { id, position }),
+                ) {
+                    let change = GraphChange {
+                        id: graph.next,
+                        lamport: graph.next.counter as u32,
+                        op: op.clone(),
+                        forward: true,
+                    };
+                    graph
+                        .state
+                        .validate_changes(std::slice::from_ref(&change))?;
+                    graph.state.apply_changes(vec![change]);
+                    if op.created_meta().is_some() {
+                        graph.maps.insert(graph.next, MapHandler::new_detached());
+                    }
+                    graph.next = graph.next.inc(1);
+                }
+                Ok((
+                    edge,
+                    GraphReorderOutcome {
+                        changed: true,
+                        auxiliary_updates,
+                    },
+                ))
+            }
+            MaybeDetached::Attached(a) => a.with_txn(|txn| {
+                Ok((|| -> Result<_, GraphOrderError> {
+                    let Some(plan) = a.with_state(|s| prepare(s.as_graph_state().unwrap()))? else {
+                        return Ok((
+                            moving.unwrap(),
+                            GraphReorderOutcome {
+                                changed: false,
+                                auxiliary_updates: 0,
+                            },
+                        ));
+                    };
+                    check_order_capacity(
+                        txn.next_id(),
+                        txn.next_idlp().lamport,
+                        plan.auxiliary.len() + 1,
+                    )?;
+                    let edge = moving.unwrap_or_else(|| GraphEdgeId::from_id(txn.next_id()));
+                    let op = match create {
+                        Some((source, target)) => GraphOp::CreateEdge {
+                            id: edge,
+                            source,
+                            target,
+                            position: plan.position,
+                        },
+                        None => GraphOp::SetEdgeOrder {
+                            id: edge,
+                            position: plan.position,
+                        },
+                    };
+                    let auxiliary_updates = plan.auxiliary.len();
+                    self.write_with_txn(txn, op)?;
+                    for (id, position) in plan.auxiliary {
+                        self.write_with_txn(txn, GraphOp::SetEdgeOrder { id, position })?;
+                    }
+                    Ok((
+                        edge,
+                        GraphReorderOutcome {
+                            changed: true,
+                            auxiliary_updates,
+                        },
+                    ))
+                })())
+            })?,
+        }
     }
     pub fn delete_node(&self, id: GraphNodeId) -> LoroResult<()> {
         self.write(|_, _| Ok(GraphOp::DeleteNode { id }))
@@ -367,7 +532,7 @@ impl GraphHandler {
         // A history diff names original operation IDs. Compute its net effect
         // first; replaying each inverse separately can create a new Delete that
         // the following Restore cannot name. Preserve untouched remote tags.
-        let plan = self.read(|state| state.local_diff_ops(&diff.ops, |id| remapped(id, remap)))?;
+        let plan = self.read(|state| state.local_diff_ops(&diff, |id| remapped(id, remap)))?;
         for op in plan {
             let op = match op {
                 GraphOp::CreateNode { id } => {
@@ -378,17 +543,30 @@ impl GraphHandler {
                     );
                     continue;
                 }
-                GraphOp::CreateEdge { id, source, target } => {
-                    let new = self.create_edge(
-                        GraphNodeId::from_id(remapped(source.id(), remap)),
-                        GraphNodeId::from_id(remapped(target.id(), remap)),
-                    )?;
+                GraphOp::CreateEdge {
+                    id,
+                    source,
+                    target,
+                    position,
+                } => {
+                    let new = GraphEdgeId::from_id(self.write(|fresh, _| {
+                        Ok(GraphOp::CreateEdge {
+                            id: GraphEdgeId::from_id(fresh),
+                            source: GraphNodeId::from_id(remapped(source.id(), remap)),
+                            target: GraphNodeId::from_id(remapped(target.id(), remap)),
+                            position,
+                        })
+                    })?);
                     remap.insert(
                         id.associated_meta_container(),
                         new.associated_meta_container(),
                     );
                     continue;
                 }
+                GraphOp::SetEdgeOrder { id, position } => GraphOp::SetEdgeOrder {
+                    id: GraphEdgeId::from_id(remapped(id.id(), remap)),
+                    position,
+                },
                 GraphOp::DeleteNode { id } => GraphOp::DeleteNode {
                     id: GraphNodeId::from_id(remapped(id.id(), remap)),
                 },
@@ -409,6 +587,104 @@ impl GraphHandler {
         Ok(())
     }
 }
+struct OrderEdit {
+    position: GraphPosition,
+    auxiliary: Vec<(GraphEdgeId, GraphPosition)>,
+}
+
+fn check_order_capacity(id: ID, lamport: u32, count: usize) -> Result<(), GraphOrderError> {
+    let count = i32::try_from(count).map_err(|_| {
+        GraphOrderError::Engine(LoroError::ArgErr(
+            "Graph edit exceeds operation capacity".into(),
+        ))
+    })?;
+    if id.counter.checked_add(count).is_none() || lamport.checked_add(count as u32).is_none() {
+        return Err(GraphOrderError::Engine(LoroError::ArgErr(
+            "Graph edit exceeds operation capacity".into(),
+        )));
+    }
+    Ok(())
+}
+
+fn plan_order(
+    state: &GraphState,
+    source: GraphNodeId,
+    moving: Option<GraphEdgeId>,
+    destination: GraphOrderTarget,
+) -> Result<Option<OrderEdit>, GraphOrderError> {
+    let index = state.ordered_outgoing.get(&source);
+    let len = index.map_or(0, |i| i.len());
+    let old_rank = moving.and_then(|id| index.and_then(|i| i.rank(id)));
+    let remaining = len - usize::from(moving.is_some());
+    let target = match destination {
+        GraphOrderTarget::Start => 0,
+        GraphOrderTarget::End => remaining,
+        GraphOrderTarget::Before(anchor) | GraphOrderTarget::After(anchor) => {
+            let edge = state
+                .edge_record(anchor)
+                .filter(|e| e.visible)
+                .ok_or(GraphOrderError::AnchorNotVisible)?;
+            if edge.source != source {
+                return Err(GraphOrderError::CrossSource);
+            }
+            if moving == Some(anchor) {
+                return Ok(None);
+            }
+            let rank = index
+                .and_then(|i| i.rank(anchor))
+                .ok_or(GraphOrderError::AnchorNotVisible)?;
+            rank - usize::from(old_rank.is_some_and(|old| old < rank))
+                + usize::from(matches!(destination, GraphOrderTarget::After(_)))
+        }
+    };
+    if old_rank == Some(target) {
+        return Ok(None);
+    }
+    let at = |i: usize| -> Option<(GraphEdgeId, GraphPosition)> {
+        if i >= remaining {
+            return None;
+        }
+        let original = i + usize::from(old_rank.is_some_and(|old| old <= i));
+        let id = index?.at(original)?;
+        Some((id, state.edge_record(id)?.position))
+    };
+    let left = target.checked_sub(1).and_then(at).map(|(_, p)| p);
+    let right = at(target).map(|(_, p)| p);
+    if left
+        .as_ref()
+        .zip(right.as_ref())
+        .is_some_and(|(a, b)| a == b)
+    {
+        let mut suffix = Vec::new();
+        let mut after = target;
+        while let Some((id, position)) = at(after) {
+            if Some(&position) != left.as_ref() {
+                break;
+            }
+            suffix.push(id);
+            after += 1;
+        }
+        let upper = at(after).map(|(_, p)| p);
+        let mut positions = GraphPosition::evenly(
+            left.as_ref(),
+            upper.as_ref(),
+            suffix.len() + 1,
+            state.order_jitter,
+        )?
+        .into_iter();
+        let position = positions.next().unwrap();
+        Ok(Some(OrderEdit {
+            position,
+            auxiliary: suffix.into_iter().zip(positions).collect(),
+        }))
+    } else {
+        Ok(Some(OrderEdit {
+            position: GraphPosition::between(left.as_ref(), right.as_ref(), state.order_jitter)?,
+            auxiliary: Vec::new(),
+        }))
+    }
+}
+
 fn missing() -> LoroError {
     LoroError::ArgErr(
         "Graph object does not belong to this graph or does not exist at this version".into(),
@@ -496,6 +772,7 @@ impl HandlerTrait for GraphHandler {
                     id,
                     source: remap[&e.source],
                     target: remap[&e.target],
+                    position: e.position.clone(),
                 },
             )?;
             self.edge_meta(e.id)?.attach(

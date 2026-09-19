@@ -72,6 +72,25 @@ impl DiffBatch {
         }
     }
 
+    fn transform_for_undo(&mut self, other: &Self, spans: &[(IdSpan, Frontiers)]) {
+        for (id, diff) in &mut self.cid_to_events {
+            let Some(other) = other.cid_to_events.get(id) else {
+                continue;
+            };
+            match (diff, other) {
+                (Diff::Graph(graph), Diff::Graph(other)) => {
+                    // An independent dependency can split one selected undo
+                    // group into several spans. Later selected order writers
+                    // are part of this undo, not protected remote edits.
+                    graph.transform_with_selected(other, |id| {
+                        spans.iter().any(|(span, _)| span.contains(id))
+                    });
+                }
+                (diff, other) => diff.transform(other, true),
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.cid_to_events.clear();
         self.order.clear();
@@ -1116,7 +1135,7 @@ pub(crate) fn undo(
                 // ------------------------------------------------------------------------------
                 // 1.b Transform and apply Ci-1 based on Ai, call it A'i
                 // ------------------------------------------------------------------------------
-                last_ci.transform(&event_a_i, true);
+                last_ci.transform_for_undo(&event_a_i, &spans);
 
                 event_a_i.compose(&last_ci);
                 event_a_i
@@ -1129,7 +1148,7 @@ pub(crate) fn undo(
             // --------------------------------------------------
             // 3. Transform event A'_i based on B_i, call it C_i
             // --------------------------------------------------
-            event_a_prime.transform(event_b_i, true);
+            event_a_prime.transform_for_undo(event_b_i, &spans);
 
             // println!("event_a_prime: {:?}", event_a_prime);
 

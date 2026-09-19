@@ -111,6 +111,10 @@ impl Op {
         }
 
         match &self.content {
+            // Graph positions and observed-delete sets are variable-size, but
+            // the operation is one indivisible atom. Flush that whole atom in
+            // its own block, even when it exceeds the block's size estimate.
+            InnerContent::Graph(_) => Some(1),
             InnerContent::List(l) => match l {
                 crate::container::list::list_op::InnerListOp::Insert { .. } => {
                     if matches!(self.container.get_type(), ContainerType::Text) {

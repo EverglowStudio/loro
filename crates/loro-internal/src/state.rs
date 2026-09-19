@@ -1978,7 +1978,7 @@ impl DocState {
                 *last_container_diff = prev.compose(container_diff.diff).unwrap();
             }
         }
-        // Graph record upserts rebuild their metadata slot. Complete the subtree
+        // Graph lifecycle upserts rebuild their metadata slot. Complete the subtree
         // after composing the event batch so local restores also revive children,
         // and multiple full Text/List diffs are never composed as repeated inserts.
         // Only changed visible records are seeds; graph relations are not owners.
@@ -2549,11 +2549,14 @@ fn trigger_on_new_container(
             }
         }
         Diff::Graph(graph) => {
+            let order_only = graph.order_only_edges();
             for node in graph.nodes.values().flatten().filter(|node| node.visible) {
                 listener(arena.register_container(&node.id.associated_meta_container()));
             }
             for edge in graph.edges.values().flatten().filter(|edge| edge.visible) {
-                listener(arena.register_container(&edge.id.associated_meta_container()));
+                if !order_only.contains(&edge.id) {
+                    listener(arena.register_container(&edge.id.associated_meta_container()));
+                }
             }
         }
         _ => {}

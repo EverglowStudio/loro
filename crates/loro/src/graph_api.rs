@@ -2,6 +2,10 @@
 use crate::{
     Container, ContainerID, ContainerTrait, Frontiers, LoroDoc, LoroMap, LoroValue, SealedTrait,
 };
+pub use loro_internal::container::graph::{
+    GraphOrderDelta, GraphOrderError, GraphOrderTarget, GraphOrderValue, GraphPosition,
+    GraphReorderOutcome, OrderedGraphEdge,
+};
 pub use loro_internal::graph::{GraphRepairError, GraphSnapshot};
 pub use loro_internal::handler::{GraphDiff, GraphEdge, GraphNode};
 pub use loro_internal::loro_common::{GraphEdgeId, GraphNodeId};
@@ -36,6 +40,41 @@ impl LoroGraph {
     /// Create a directed edge with immutable endpoints. Parallel edges, self-loops and cycles are valid. Both endpoint records must belong to this graph.
     pub fn create_edge(&self, source: GraphNodeId, target: GraphNodeId) -> LoroResult<GraphEdgeId> {
         self.handler.create_edge(source, target)
+    }
+    /// Create an edge at the local visible gap. Anchors are evaluated once under the transaction lock.
+    /// Collision suffix writes use ordinary per-edge LWW, including against concurrent user moves.
+    pub fn create_edge_at(
+        &self,
+        source: GraphNodeId,
+        target: GraphNodeId,
+        order: GraphOrderTarget,
+    ) -> Result<GraphEdgeId, GraphOrderError> {
+        self.handler.create_edge_at(source, target, order)
+    }
+    /// Reorder one visible edge without changing its identity, endpoints, metadata or lifecycle.
+    /// Self anchors and already-satisfied positions consume no operation IDs.
+    pub fn reorder_edge(
+        &self,
+        edge: GraphEdgeId,
+        order: GraphOrderTarget,
+    ) -> Result<GraphReorderOutcome, GraphOrderError> {
+        self.handler.reorder_edge(edge, order)
+    }
+    /// Snapshot the visible outgoing sequence, preserving parallel edges.
+    pub fn ordered_out_edges(&self, source: GraphNodeId) -> LoroResult<Vec<OrderedGraphEdge>> {
+        self.handler.ordered_out_edges(source)
+    }
+    /// Select a visible outgoing edge by its current local index.
+    pub fn out_edge_at(&self, source: GraphNodeId, index: usize) -> Option<OrderedGraphEdge> {
+        self.handler.out_edge_at(source, index)
+    }
+    /// Read the rank of a visible edge within its source's sequence.
+    pub fn index_of_out_edge(&self, edge: GraphEdgeId) -> Option<usize> {
+        self.handler.index_of_out_edge(edge)
+    }
+    /// Configure local random allocation bytes (default zero); remote interpretation is deterministic.
+    pub fn configure_order_jitter(&self, jitter: u8) {
+        self.handler.configure_order_jitter(jitter);
     }
     /// Add a deletion tag for this node. This does not delete other nodes or edge records; incident edges become invisible while either endpoint is deleted.
     pub fn delete_node(&self, id: GraphNodeId) -> LoroResult<()> {

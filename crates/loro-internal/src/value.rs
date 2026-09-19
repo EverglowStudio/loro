@@ -1247,6 +1247,7 @@ fn apply_graph_value_diff(
     map: &mut loro_common::LoroMapValue,
     diff: &crate::container::graph::GraphDiff,
 ) {
+    let order_only = diff.order_only_edges();
     for table in ["nodes", "edges"] {
         let existing = map
             .get(table)
@@ -1260,37 +1261,60 @@ fn apply_graph_value_diff(
                 Some((id, v))
             })
             .collect();
-        let updates: Vec<(String, bool, Option<(String, String)>)> = if table == "nodes" {
-            diff.nodes
-                .iter()
-                .map(|(id, n)| (id.to_string(), n.as_ref().is_some_and(|n| n.visible), None))
-                .collect()
-        } else {
-            diff.edges
-                .iter()
-                .map(|(id, e)| {
-                    (
-                        id.to_string(),
-                        e.as_ref().is_some_and(|e| e.visible),
-                        e.as_ref()
-                            .map(|e| (e.source.to_string(), e.target.to_string())),
-                    )
-                })
-                .collect()
-        };
-        for (id, visible, ends) in updates {
+        let updates: Vec<(String, bool, Option<(String, String, String)>, bool)> =
+            if table == "nodes" {
+                diff.nodes
+                    .iter()
+                    .map(|(id, n)| {
+                        (
+                            id.to_string(),
+                            n.as_ref().is_some_and(|n| n.visible),
+                            None,
+                            false,
+                        )
+                    })
+                    .collect()
+            } else {
+                diff.edges
+                    .iter()
+                    .map(|(id, e)| {
+                        (
+                            id.to_string(),
+                            e.as_ref().is_some_and(|e| e.visible),
+                            e.as_ref().map(|e| {
+                                (
+                                    e.source.to_string(),
+                                    e.target.to_string(),
+                                    e.position.to_string(),
+                                )
+                            }),
+                            order_only.contains(id),
+                        )
+                    })
+                    .collect()
+            };
+        for (id, visible, ends, preserve_meta) in updates {
             if !visible {
                 rows.remove(&id);
                 continue;
             }
-            // Graph record events are followed by a full metadata subtree. Reset
-            // the row first, including when checkout has removed metadata keys.
-            let meta = LoroValue::Map(Default::default());
+            // Only lifecycle upserts are followed by full metadata. Order writes
+            // patch the row without erasing concurrent nested metadata edits.
+            let meta = if preserve_meta {
+                rows.get(&id)
+                    .and_then(|row| row.as_map())
+                    .and_then(|row| row.get("meta"))
+                    .cloned()
+            } else {
+                None
+            }
+            .unwrap_or_else(|| LoroValue::Map(Default::default()));
             let mut row =
                 crate::fx_map!("id".to_string()=>id.clone().into(),"meta".to_string()=>meta);
-            if let Some((source, target)) = ends {
+            if let Some((source, target, position)) = ends {
                 row.insert("source".into(), source.into());
                 row.insert("target".into(), target.into());
+                row.insert("position".into(), position.into());
             }
             rows.insert(id, row.into());
         }

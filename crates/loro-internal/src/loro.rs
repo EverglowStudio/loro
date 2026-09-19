@@ -1262,15 +1262,23 @@ impl LoroDoc {
         }
         drop(txn);
         self.start_auto_commit();
-        // Try applying the diff, but ignore the error if it happens.
-        // MovableList's undo behavior is too tricky to handle in a collaborative env
-        // so in edge cases this may be an Error
-        if let Err(e) = self._apply_diff(diff, container_remap, true) {
-            warn!("Undo Failed {:?}", e);
-        }
+        // Keep the existing best-effort behavior for other container batches.
+        // A Graph edit (including its metadata) must not report a failed undo as
+        // success. Its handler validates the complete plan before generating ops.
+        let has_graph = diff
+            .cid_to_events
+            .values()
+            .any(|diff| matches!(diff, crate::event::Diff::Graph(_)));
+        let apply_result = self._apply_diff(diff, container_remap, true);
 
         if let Some(options) = options {
             self.set_next_commit_options(options);
+        }
+        if let Err(e) = apply_result {
+            if has_graph {
+                return Err(e);
+            }
+            warn!("Undo Failed {:?}", e);
         }
         Ok(CommitWhenDrop {
             doc: self,

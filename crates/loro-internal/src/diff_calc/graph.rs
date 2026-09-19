@@ -50,6 +50,7 @@ impl DiffCalculatorTrait for GraphDiffCalculator {
                     *lp,
                     GraphChange {
                         id: *id,
+                        lamport: *lp,
                         op: op.clone(),
                         forward: false,
                     },
@@ -65,6 +66,7 @@ impl DiffCalculatorTrait for GraphDiffCalculator {
                     *lp,
                     GraphChange {
                         id: *id,
+                        lamport: *lp,
                         op: op.clone(),
                         forward: true,
                     },

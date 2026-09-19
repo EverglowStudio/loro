@@ -1,4 +1,6 @@
 //! Rebase a history diff into local edits without replaying obsolete operation IDs.
+mod copy_order;
+
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -15,7 +17,8 @@ impl Object {
             | GraphOp::RestoreNode { id, .. } => Self::Node(*id),
             GraphOp::CreateEdge { id, .. }
             | GraphOp::DeleteEdge { id }
-            | GraphOp::RestoreEdge { id, .. } => Self::Edge(*id),
+            | GraphOp::RestoreEdge { id, .. }
+            | GraphOp::SetEdgeOrder { id, .. } => Self::Edge(*id),
         }
     }
 
@@ -47,12 +50,17 @@ impl GraphState {
     /// This is an explicit diff/undo path, never part of normal CRUD or import.
     pub(crate) fn local_diff_ops(
         &self,
-        changes: &[GraphChange],
+        diff: &GraphDiff,
         remap: impl Fn(ID) -> ID,
     ) -> LoroResult<Vec<GraphOp>> {
         let mut edits: BTreeMap<Object, Edit> = BTreeMap::new();
-        for change in changes {
+        for change in &diff.ops {
             change.op.validate(change.id)?;
+            // Order edits use the net delta, not source operation membership.
+            // A copied graph has new IDs, and an earlier Undo has a new writer.
+            if matches!(change.op, GraphOp::SetEdgeOrder { .. }) {
+                continue;
+            }
             let object = Object::of(&change.op);
             let edit = edits.entry(object).or_insert_with(|| {
                 let before = match object {
@@ -86,18 +94,20 @@ impl GraphState {
                     }
                 }
                 GraphOp::DeleteNode { .. } | GraphOp::DeleteEdge { .. } => {
-                    edit.after
-                        .as_mut()
-                        .ok_or_else(invalid)?
-                        .delete(change.id, change.forward);
+                    edit.after.as_mut().ok_or_else(invalid)?.delete(
+                        change.id,
+                        change.lamport,
+                        change.forward,
+                    );
                 }
                 GraphOp::RestoreNode { deletes, .. } | GraphOp::RestoreEdge { deletes, .. } => {
                     let life = edit.after.as_mut().ok_or_else(invalid)?;
-                    if change.forward && deletes.iter().any(|id| !life.deletes.contains(id)) {
+                    if change.forward && deletes.iter().any(|id| !life.deletes.contains_key(id)) {
                         return Err(invalid());
                     }
-                    life.restore(change.id, deletes, change.forward);
+                    life.restore(change.id, change.lamport, deletes, change.forward);
                 }
+                GraphOp::SetEdgeOrder { .. } => unreachable!(),
             }
         }
 
@@ -123,9 +133,50 @@ impl GraphState {
                         }
                     }
                 }
-                creates.push(op.clone());
+                let mut op = op.clone();
+                if let GraphOp::CreateEdge { id, position, .. } = &mut op {
+                    if let Some(after) = diff.orders.get(id).and_then(|delta| delta.after.as_ref())
+                    {
+                        *position = after.position.clone();
+                    }
+                }
+                creates.push(op);
             }
         }
+        // Key by the destination's existing identity so copy-order adjustments
+        // replace a planned write, including when the diff uses a remapped ID.
+        let mut orders = BTreeMap::new();
+        for (id, delta) in &diff.orders {
+            let Some(after) = &delta.after else {
+                continue;
+            };
+            if delta
+                .before
+                .as_ref()
+                .is_some_and(|before| before.position == after.position)
+            {
+                continue;
+            }
+            // Creation already carries the final position. Retreating creation
+            // becomes a lifecycle edit, never a position write to an absent edge.
+            if edits
+                .get(&Object::Edge(*id))
+                .is_some_and(|edit| edit.create.is_some() || edit.after.is_none())
+            {
+                continue;
+            }
+            let current_id = GraphEdgeId::from_id(remap(id.id()));
+            let current = self.records.edges.get(&current_id).ok_or_else(invalid)?;
+            if current.source != GraphNodeId::from_id(remap(delta.source.id())) {
+                return Err(invalid());
+            }
+            if current.order().position != after.position {
+                orders.insert(current_id, (*id, after.position.clone()));
+            }
+        }
+        // All key allocation and validation completes before this method returns
+        // any local write. Ordinary create/reorder and remote replay bypass it.
+        self.plan_copied_edge_order(&edits, &remap, &mut creates, &mut orders)?;
         let mut result = creates;
         for (object, edit) in edits {
             let Some(after) = edit.after else {
@@ -157,6 +208,10 @@ impl GraphState {
                 result.push(object.delete());
             }
         }
+        result.extend(orders.into_iter().filter_map(|(current, (id, position))| {
+            (self.records.edges[&current].order().position != position)
+                .then_some(GraphOp::SetEdgeOrder { id, position })
+        }));
         Ok(result)
     }
 }
